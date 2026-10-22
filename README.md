@@ -120,29 +120,33 @@ wp application-password scope groups
 
 ## What core would need
 
-Almost everything was possible with existing hooks, which is a credit to the 5.6 extension points. The gaps:
+Almost everything was possible with existing hooks, which is a credit to the 5.6 extension points. Each gap is tracked as a sub-issue of [#1](https://github.com/georgestephanis/application-passwords-scoped/issues/1):
 
-1. **A place for metadata on the password item.** `WP_Application_Passwords::update_application_password()` only round-trips known keys, so scopes live in a parallel meta row. A `scope` (or general `meta`) key on the item would remove that.
-2. **The active password should be known outside REST.** `rest_get_authenticated_app_password()` is REST-only, and XML-RPC has no equivalent. A generic `wp_get_authenticated_application_password()` would help.
-3. **`is_super_admin()` has no filter**, so restricting a super admin takes an option-filter workaround.
-4. **Read-only is method-based.** It relies on GET endpoints not mutating state. That holds for core but isn't guaranteed for plugins. Per-route `readonly` annotations, like abilities have, would make this stronger.
-5. **Authorize-flow protocol.** `scope` in the authorize URL is invented here. A core-blessed format, and a way to report the *granted* scope back on the `success_url`, would let apps request least privilege consistently.
+- [#3](https://github.com/georgestephanis/application-passwords-scoped/issues/3) Store metadata on the Application Password item
+- [#4](https://github.com/georgestephanis/application-passwords-scoped/issues/4) Expose the authenticated Application Password outside REST
+- [#5](https://github.com/georgestephanis/application-passwords-scoped/issues/5) `is_super_admin()` needs a filter
+- [#6](https://github.com/georgestephanis/application-passwords-scoped/issues/6) Read-only scopes need route-level `readonly` annotations
+- [#7](https://github.com/georgestephanis/application-passwords-scoped/issues/7) Standard authorize-flow protocol for requesting and reporting scopes
 
 ## Open questions
 
-- Should approvers be able to *loosen* what an app requested, or only tighten it? This prototype allows both, with the request shown prominently.
-- Should a scope be editable after creation? Changing a scope silently changes the authority behind an existing credential. Revoke-and-reissue may be the safer UX. The REST/CLI here allow edits; the UI does not.
-- Are a dozen capability groups the right granularity? Should plugins register their own groups, the way WooCommerce might?
-- Should scoping be mandatory for some new passwords, for example defaulting AI-agent connections to abilities-only?
+Provisional design decisions are tracked as sub-issues of [#2](https://github.com/georgestephanis/application-passwords-scoped/issues/2):
+
+- [#8](https://github.com/georgestephanis/application-passwords-scoped/issues/8) Can approvers loosen what an app requested?
+- [#9](https://github.com/georgestephanis/application-passwords-scoped/issues/9) Should scopes be editable after creation?
+- [#10](https://github.com/georgestephanis/application-passwords-scoped/issues/10) Capability group granularity and plugin-registered groups
+- [#11](https://github.com/georgestephanis/application-passwords-scoped/issues/11) Default scopes for new passwords (e.g. AI agents)
+- [#12](https://github.com/georgestephanis/application-passwords-scoped/issues/12) Granter cap: semantics when the granter changes or is deleted
 
 ## Development
 
 ```bash
 composer install
-composer phpcs
+composer phpcs        # lint
+tests/smoke.sh        # end-to-end tests against WordPress Playground
 ```
 
-Requires WordPress 6.9+ (Abilities API) and PHP 7.4+. The Playground link above sets up a few example scoped passwords and opens the authorize screen with a pre-filled scope request.
+Requires WordPress 6.9+ (Abilities API) and PHP 7.4+. See [AGENTS.md](AGENTS.md) for setup, local testing, architecture, and the invariants any change must keep. The Playground link above sets up example scoped passwords and opens the authorize screen with a pre-filled scope request.
 
 ## License
 
