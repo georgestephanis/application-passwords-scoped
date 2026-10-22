@@ -36,10 +36,11 @@ class Enforcer {
 	);
 
 	/**
-	 * Meta capabilities a scoped password can't use *on its own user*. Changing the account's
-	 * password or email would be an escape hatch to an unscoped cookie session.
+	 * Meta capabilities that act on another user account. A scoped password can't use them on its
+	 * own account, or on any account that can do more than the scope allows. Otherwise it could
+	 * reset that account's password or email and log in as it, escaping the scope.
 	 */
-	const SELF_CAPS = array( 'edit_user', 'delete_user', 'remove_user', 'promote_user' );
+	const USER_CAPS = array( 'edit_user', 'delete_user', 'remove_user', 'promote_user' );
 
 	/**
 	 * Active scope, if the current request authenticated with a restricted Application Password.
@@ -56,13 +57,6 @@ class Enforcer {
 	private static $user_id = 0;
 
 	/**
-	 * UUID of the active password.
-	 *
-	 * @var string
-	 */
-	private static $uuid = '';
-
-	/**
 	 * Register hooks.
 	 */
 	public static function init() {
@@ -70,6 +64,8 @@ class Enforcer {
 		add_action( 'wp_authenticate_application_password_errors', array( __CLASS__, 'validate' ), 10, 3 );
 		add_filter( 'site_option_site_admins', array( __CLASS__, 'filter_super_admins' ) );
 		add_filter( 'map_meta_cap', array( __CLASS__, 'map_meta_cap' ), PHP_INT_MAX, 4 );
+		add_filter( 'editable_roles', array( __CLASS__, 'editable_roles' ), PHP_INT_MAX );
+		add_filter( 'rest_pre_insert_user', array( __CLASS__, 'default_role_for_new_user' ), PHP_INT_MAX );
 		add_filter( 'rest_pre_dispatch', array( __CLASS__, 'rest_pre_dispatch' ), 10, 3 );
 		add_filter( 'wp_ability_permission_result', array( __CLASS__, 'ability_permission' ), 10, 4 );
 		add_action( 'wp_delete_application_password', array( __CLASS__, 'cleanup' ), 10, 2 );
@@ -97,7 +93,6 @@ class Enforcer {
 		if ( $scope instanceof Scope && $scope->is_restricted() ) {
 			self::$scope   = $scope;
 			self::$user_id = (int) $user->ID;
-			self::$uuid    = $item['uuid'];
 		}
 	}
 
@@ -116,7 +111,6 @@ class Enforcer {
 	public static function reset() {
 		self::$scope   = null;
 		self::$user_id = 0;
-		self::$uuid    = '';
 	}
 
 	/**
@@ -193,7 +187,7 @@ class Enforcer {
 			return array( 'do_not_allow' );
 		}
 
-		if ( in_array( $cap, self::SELF_CAPS, true ) && isset( $args[0] ) && (int) $args[0] === self::$user_id ) {
+		if ( in_array( $cap, self::USER_CAPS, true ) && isset( $args[0] ) && ! self::may_manage_user( (int) $args[0] ) ) {
 			return array( 'do_not_allow' );
 		}
 
@@ -204,6 +198,92 @@ class Enforcer {
 		}
 
 		return $caps;
+	}
+
+	/**
+	 * Whether the active scoped password may act on another user account.
+	 *
+	 * Never its own account. For others, only when the scope limits no capabilities, or the target
+	 * can do nothing the scope forbids. A password scoped to Author can still edit a Subscriber's
+	 * profile, if the user could, but not an Editor's.
+	 *
+	 * @param int $target_id User being acted on.
+	 * @return bool
+	 */
+	private static function may_manage_user( $target_id ) {
+		if ( $target_id === self::$user_id ) {
+			return false;
+		}
+
+		if ( ! self::$scope->limits_caps() ) {
+			return true;
+		}
+
+		$target = get_userdata( $target_id );
+
+		if ( ! $target ) {
+			return true; // Nothing to escalate into; let core return its own not-found error.
+		}
+
+		if ( is_multisite() && is_super_admin( $target_id ) ) {
+			return false;
+		}
+
+		foreach ( array_keys( array_filter( $target->allcaps ) ) as $cap ) {
+			if ( ! self::$scope->allows_cap( $cap ) ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * Hide roles a scoped password couldn't exercise itself, so it can't create or promote a user
+	 * into one. The REST users endpoint checks this list whenever a request sets `roles`.
+	 *
+	 * @param array $roles Editable roles, keyed by slug.
+	 * @return array
+	 */
+	public static function editable_roles( $roles ) {
+		if ( ! self::$scope || ! self::$scope->limits_caps() || get_current_user_id() !== self::$user_id ) {
+			return $roles;
+		}
+
+		foreach ( $roles as $slug => $details ) {
+			foreach ( array_keys( array_filter( $details['capabilities'] ) ) as $cap ) {
+				if ( ! self::$scope->allows_cap( $cap ) ) {
+					unset( $roles[ $slug ] );
+					break;
+				}
+			}
+		}
+
+		return $roles;
+	}
+
+	/**
+	 * A user created over REST without `roles` gets the site's `default_role`, which bypasses the
+	 * `editable_roles` check. If that default is out of scope, create the user with no role
+	 * instead. This filter can't return an error, so failing closed this way is the safe option.
+	 *
+	 * @param \stdClass $prepared_user User object about to be inserted.
+	 * @return \stdClass
+	 */
+	public static function default_role_for_new_user( $prepared_user ) {
+		if ( ! self::$scope || ! self::$scope->limits_caps() || get_current_user_id() !== self::$user_id ) {
+			return $prepared_user;
+		}
+
+		if ( empty( $prepared_user->ID ) && ! isset( $prepared_user->role ) ) {
+			require_once ABSPATH . 'wp-admin/includes/user.php';
+
+			if ( ! isset( get_editable_roles()[ get_option( 'default_role' ) ] ) ) {
+				$prepared_user->role = '';
+			}
+		}
+
+		return $prepared_user;
 	}
 
 	/**

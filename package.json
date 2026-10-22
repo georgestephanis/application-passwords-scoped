@@ -1,0 +1,34 @@
+{
+	"name": "application-passwords-scoped",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Exploration of per-password scopes for WordPress Application Passwords.",
+	"author": "George Stephanis",
+	"license": "GPL-2.0-or-later",
+	"keywords": [
+		"wordpress",
+		"application-passwords",
+		"permissions",
+		"abilities-api"
+	],
+	"homepage": "https://github.com/georgestephanis/application-passwords-scoped#readme",
+	"repository": "github:georgestephanis/application-passwords-scoped",
+	"bugs": {
+		"url": "https://github.com/georgestephanis/application-passwords-scoped/issues"
+	},
+	"engines": {
+		"node": ">=22.22.2"
+	},
+	"devDependencies": {
+		"@wordpress/scripts": "36.1.0"
+	},
+	"scripts": {
+		"lint": "npm run lint:js && npm run lint:style && npm run lint:pkg-json && npm run lint:md:docs",
+		"lint:js": "wp-scripts lint-js assets",
+		"lint:style": "wp-scripts lint-style \"assets/**/*.css\"",
+		"lint:pkg-json": "wp-scripts lint-pkg-json .",
+		"lint:md:docs": "wp-scripts lint-md-docs README.md AGENTS.md",
+		"format": "wp-scripts format assets",
+		"test:smoke": "tests/smoke.sh"
+	}
+}

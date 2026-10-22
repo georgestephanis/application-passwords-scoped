@@ -12,7 +12,7 @@ the relevant issue before changing behavior it covers, and link it from your com
 **Every restriction is subtractive.** A scope can only remove capabilities, never grant them. The
 effective permission for any check is:
 
-```
+```text
 owner can  ∧  scope allows  ∧  (granter can, if granted_by is set)
 ```
 
@@ -21,8 +21,9 @@ is a security bug. The same goes for any change that lets a password widen its o
 
 ## File structure
 
-```
+```text
 application-passwords-scoped.php   Thin loader: requires includes/, calls each class's init().
+uninstall.php                      Deletes stored scopes. Core's passwords are left alone.
 includes/
 ├── class-scope.php                Scope value object: parsing untrusted input, allows_cap(),
 │                                  allows_ability(), summary(). All policy decisions live here.
@@ -40,6 +41,10 @@ tests/playground/                  Test-only blueprint + mu-plugin fixture. Neve
 .github/blueprint.json             Public "Open in Playground" demo.
 .github/setup.php                  Demo data for that blueprint (example scoped passwords, roles).
 .github/screenshots/               README images.
+.github/workflows/lint.yml         CI: composer lint:php + npm run lint.
+.phpcs.xml                         WordPress + PHPCompatibilityWP ruleset, covers all PHP files.
+package.json                       @wordpress/scripts (lint/format only, no build), pinned.
+.editorconfig, .nvmrc              WordPress core's editor settings; Node version for CI.
 ```
 
 ## How enforcement works
@@ -47,15 +52,18 @@ tests/playground/                  Test-only blueprint + mu-plugin fixture. Neve
 Everything hangs off hooks core already ships. Don't patch or replace core behavior.
 
 | Hook | Class | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `application_password_did_authenticate` | Enforcer | Record which password authenticated and load its scope. |
 | `wp_authenticate_application_password_errors` | Enforcer | Fail auth for expired passwords, and for request-level scopes over XML-RPC. |
 | `map_meta_cap` @ `PHP_INT_MAX` | Enforcer | Return `do_not_allow` if any required primitive cap is out of scope. The backbone. |
+| `editable_roles` | Enforcer | Hide roles the scope couldn't exercise, so a scoped password can't create or promote users into them. |
+| `rest_pre_insert_user` | Enforcer | A user created without `roles` gets no role if `default_role` is out of scope. |
 | `site_option_site_admins` | Enforcer | Drop a cap-limited user from super admins for the request (`is_super_admin()` skips `map_meta_cap`). |
 | `rest_pre_dispatch` | Enforcer | Read-only (HTTP method) and abilities-only (route) gates. Also runs per `/batch/v1` sub-request. |
 | `wp_ability_permission_result` | Enforcer | Ability allowlist; read-only passwords only run `readonly`-annotated abilities. |
 | `wp_create_application_password` | Enforcer, Admin | Record `granted_by` when one user creates a password for another; no-JS authorize form. |
 | `wp_delete_application_password` | Enforcer | Delete the scope with its password. |
+| `after_plugin_row_<plugin>` | Admin | Warn that deactivating removes every restriction (fails open, see #13). |
 
 Enforcement only applies when `$user_id` matches the user the active password authenticated as.
 Checks against other users pass through untouched. `Scope::allows_cap()` calls `user_can()` on the
@@ -63,11 +71,18 @@ granter and relies on that.
 
 ### Invariants: don't break these
 
-- A scoped password can never use `create_app_password`, `edit_app_password` or
-  `delete_app_password(s)`. It also can't use `edit_user`, `delete_user`, `promote_user` or
-  `remove_user` **on its own account**. Otherwise it could mint an unscoped sibling, or change the
-  account's email/password and escape to a full cookie session. See `Enforcer::ESCALATION_CAPS` and
-  `SELF_CAPS`.
+- **A scoped password must not be able to escape through any account, its own or anyone else's.**
+    - It can never use `create_app_password`, `edit_app_password` or `delete_app_password(s)`, so it
+      can't mint an unscoped sibling or rewrite its own scope (`Enforcer::ESCALATION_CAPS`).
+    - It can't use `edit_user`, `delete_user`, `promote_user` or `remove_user` on its own account,
+      or on any account that can do more than the scope allows (`Enforcer::may_manage_user()`).
+      Otherwise it could reset that account's email or password and log in as it.
+    - It can't give anyone a role it couldn't exercise itself, whether by explicit `roles` or by the
+      site's `default_role`.
+
+  When you add a capability rule, ask what else the password could do to get it back: create a
+  user, edit a user, reset a password, install a plugin. Add a smoke test that tries the escape,
+  and check it fails against the old code.
 - `granted_by` is **always set server-side** from `get_current_user_id()`, never from request
   input. Both the REST field and `Enforcer::record_granter()` overwrite whatever was submitted.
 - `Scope::from_array()` takes untrusted input from REST, forms, CLI and the authorize URL. It must
@@ -83,20 +98,33 @@ granter and relies on that.
 
 ## Development setup
 
-Requirements: PHP 7.4+, Composer, Node 20+ (for `npx` Playground), curl, python3. The plugin
-needs WordPress 6.9+ (Abilities API). No build step: the JS and CSS are hand-written and enqueued
-directly.
+Requirements: PHP 7.4+, Composer, Node 24 (see `.nvmrc`; 22.22+ works), curl, python3. The plugin
+needs WordPress 6.9+ (Abilities API). There's no build step: the JS and CSS are hand-written and
+enqueued directly. `@wordpress/scripts` is used only for linting and formatting.
 
 ```bash
-composer install       # first time: PHPCS + WordPress Coding Standards
-composer phpcs         # lint (CI runs this on every push)
-composer phpcbf        # auto-fix what it can
+composer install              # PHPCS, WordPress Coding Standards, PHPCompatibilityWP
+npm ci --ignore-scripts       # @wordpress/scripts (no install scripts needed for linting)
+
+composer lint:php             # PHPCS: WordPress + PHPCompatibilityWP (PHP 7.4+)
+composer format:php           # PHPCBF auto-fix
+npm run lint                  # lint:js, lint:style, lint:pkg-json, lint:md:docs
+npm run format                # Prettier (wp-prettier) on assets/
+npm run test:smoke            # tests/smoke.sh
 ```
 
-Always use `./vendor/bin/phpcs` (or `composer phpcs`), not a global `phpcs`: the WPCS versions
-differ. `.phpcs.xml` lints the plugin file and `includes/`. When you add a PHP file elsewhere
-that ships, add it there. For test and demo files, lint them explicitly:
-`./vendor/bin/phpcs --standard=.phpcs.xml tests/playground/fixture.php .github/setup.php`.
+CI (`.github/workflows/lint.yml`) runs `composer lint:php` and `npm run lint` on every push to
+`trunk` and on every pull request. Both must pass.
+
+- **PHP:** `.phpcs.xml` covers every PHP file in the repo, including tests and demo setup. When
+  you add a PHP file outside those paths, add it there. Always use `composer lint:php` (or
+  `./vendor/bin/phpcs`), not a global `phpcs`: WPCS versions differ.
+- **JS/CSS:** `@wordpress/scripts` is pinned to an exact version. When you upgrade it, choose a
+  release at least two weeks old, then run `npm run format` and `npm run lint`, since its
+  Prettier and stylelint rules change between majors. `assets/admin.js` declares
+  `/* global jQuery */`: it runs in wp-admin with core's jQuery and `wp.hooks`, and isn't bundled.
+- **Docs:** `npm run lint:md:docs` lints `README.md` and `AGENTS.md`. Give fenced code blocks a
+  language, and use `| a | b |` table spacing.
 
 ## Testing
 
@@ -173,7 +201,7 @@ installs the plugin from GitHub, so it tests `trunk`, not your working tree.
 ## Workflow
 
 - Default branch `trunk`. For anything non-trivial, branch and open a PR that links the issue.
-- Before committing: `composer phpcs` is clean, and `tests/smoke.sh` passes.
+- Before committing: `composer lint:php` and `npm run lint` are clean, and `tests/smoke.sh` passes.
 - If you change the admin UI, check it in a browser (see Manual testing). Update the README
   screenshot in `.github/screenshots/` if it's now out of date.
 - Record design decisions and newly found core gaps as issues, not in the README. The README links

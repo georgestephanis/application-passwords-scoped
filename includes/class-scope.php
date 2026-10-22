@@ -77,6 +77,13 @@ final class Scope {
 	public $expires = 0;
 
 	/**
+	 * Cache for denied_caps(), keyed by the deny list it was built from.
+	 *
+	 * @var array{key: string, caps: array<string, true>}|null
+	 */
+	private $denied_cache = null;
+
+	/**
 	 * Build from untrusted array input (REST, form submission, CLI). Unknown values are dropped.
 	 *
 	 * @param mixed $data Raw data.
@@ -215,7 +222,7 @@ final class Scope {
 			return true;
 		}
 
-		if ( isset( Capability_Groups::caps_for( $this->deny )[ $cap ] ) ) {
+		if ( isset( $this->denied_caps()[ $cap ] ) ) {
 			return false;
 		}
 
@@ -248,6 +255,25 @@ final class Scope {
 		}
 
 		return false;
+	}
+
+	/**
+	 * Primitive caps withheld by the denied groups. allows_cap() runs on every capability check,
+	 * so don't re-run the groups filter each time.
+	 *
+	 * @return array<string, true>
+	 */
+	private function denied_caps() {
+		$key = implode( ',', $this->deny );
+
+		if ( null === $this->denied_cache || $key !== $this->denied_cache['key'] ) {
+			$this->denied_cache = array(
+				'key'  => $key,
+				'caps' => Capability_Groups::caps_for( $this->deny ),
+			);
+		}
+
+		return $this->denied_cache['caps'];
 	}
 
 	/**

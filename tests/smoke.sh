@@ -133,6 +133,21 @@ for pair in edit_others_posts:true manage_seo:true manage_newsletter:false; do
 	if [ "$got" = "${pair##*:}" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL eddie-granted-by-admin ${pair%%:*} expected ${pair##*:}, got $got"; fi
 done
 
+# A scoped password can't escape by acting through another account: no editing users who can do
+# more than the scope, no granting roles beyond it, and no out-of-scope default role.
+ADA="$(pw ada_id)"
+SAM="$(pw sam_id)"
+expect full      POST "/wp/v2/users/$ADA" ok '{"first_name":"Ada"}'
+expect nopublish POST "/wp/v2/users/$ADA" rest_cannot_edit '{"email":"takeover@example.test"}'
+expect nopublish POST "/wp/v2/users/$SAM" ok '{"first_name":"Sam"}'
+expect nopublish POST "/wp/v2/users/$SAM" rest_user_invalid_role '{"roles":["administrator"]}'
+expect nopublish POST /wp/v2/users rest_user_invalid_role '{"username":"mallory","email":"mallory@example.test","password":"x-Long-Passw0rd","roles":["editor"]}'
+NEW_ROLES="$("${CURL[@]}" -u "admin:$(pw nopublish)" -H 'Content-Type: application/json' \
+	-d '{"username":"trent","email":"trent@example.test","password":"x-Long-Passw0rd"}' \
+	"$URL/wp-json/wp/v2/users?context=edit" | python3 -c "import sys,json,re
+m=re.search(r'\{.*\}', sys.stdin.read(), re.S); print(','.join(json.loads(m.group(0)).get('roles', ['?'])))")"
+if [ -z "$NEW_ROLES" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL default-role user should get no role, got '$NEW_ROLES'"; fi
+
 # Denied groups (plugins, users).
 expect noplugins GET  /wp/v2/plugins rest_cannot_view_plugins
 expect noplugins POST /wp/v2/settings ok '{"blogname":"Smoke"}'

@@ -75,7 +75,7 @@ class CLI {
 	 * : Stop the password working this many seconds from now.
 	 *
 	 * [--granted-by=<user-id>]
-	 * : Also limit the password to what this user can do. The admin UI and REST API set this automatically when one user scopes another's password.
+	 * : Also limit the password to what this user can do. The admin UI and REST API set this automatically when one user scopes another's password. Defaults to the existing granter; pass 0 to remove it.
 	 *
 	 * ## EXAMPLES
 	 *
@@ -96,7 +96,8 @@ class CLI {
 				'abilities'      => array_key_exists( 'abilities', $assoc_args ) ? (string) $assoc_args['abilities'] : null,
 				'abilities_only' => ! empty( $assoc_args['abilities-only'] ),
 				'expires_in'     => (int) ( $assoc_args['expires-in'] ?? 0 ),
-				'granted_by'     => (int) ( $assoc_args['granted-by'] ?? 0 ),
+				// Keep an existing granter unless one is given: dropping it would silently loosen the scope.
+				'granted_by'     => (int) ( $assoc_args['granted-by'] ?? Scope_Store::get( $user_id, $uuid )->granted_by ),
 			)
 		);
 

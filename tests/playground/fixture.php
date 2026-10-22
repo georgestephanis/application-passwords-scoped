@@ -85,12 +85,37 @@ add_action(
 		$eddie->add_role( 'newsletter_editor' );
 		$out['eddie_id'] = $eddie->ID;
 
+		// Targets for "act through another account" tests: a second admin and a subscriber.
+		foreach ( array(
+			'ada' => 'administrator',
+			'sam' => 'subscriber',
+		) as $login => $role ) {
+			$target = get_user_by( 'login', $login );
+			if ( ! $target ) {
+				$target = get_userdata(
+					wp_insert_user(
+						array(
+							'user_login' => $login,
+							'user_pass'  => wp_generate_password(),
+							'user_email' => $login . '@example.test',
+							'role'       => $role,
+						)
+					)
+				);
+			}
+			$out[ $login . '_id' ] = $target->ID;
+		}
+
+		// An out-of-scope default role, to test users created without `roles`.
+		update_option( 'default_role', 'editor' );
+
 		$defs = array(
 			'full'      => array(),
 			'author'    => array( 'role' => 'author' ), // Legacy single-role shorthand.
 			'dropforum' => array( 'roles' => array( 'administrator', 'seo_manager' ) ),
 			'seoonly'   => array( 'roles' => array( 'seo_manager' ) ),
 			'noroles'   => array( 'roles' => array() ),
+			'nopublish' => array( 'deny' => array( 'publish' ) ),
 			'granted'   => array( 'granted_by' => $eddie->ID ), // Admin's password, capped at Eddie.
 			'noplugins' => array( 'deny' => array( 'plugins', 'users' ) ),
 			'readonly'  => array( 'read_only' => true ),

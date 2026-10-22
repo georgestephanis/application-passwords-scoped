@@ -13,7 +13,7 @@ This plugin is a working prototype of what scoping could look like. It is built 
 Every restriction only removes access. A scope can never give a password more than its user has.
 
 | Restriction | Example | Where it's enforced |
-|---|---|---|
+| --- | --- | --- |
 | **Roles** | An admin's password acts as at most an *Author*, keeping *SEO Manager* but dropping *Forum Keymaster* | `map_meta_cap` |
 | **Denied capability groups** | "Never: manage plugins, manage users" | `map_meta_cap` |
 | **Read-only** | GET/HEAD/OPTIONS only | `rest_pre_dispatch` |
@@ -73,17 +73,22 @@ The Abilities API does not replace capability scoping. Ability `permission_callb
 A scoped password could otherwise free itself. Any password with *any* restriction is therefore denied:
 
 - `create_app_password`, `edit_app_password`, and `delete_app_password(s)`, so it can't mint an unscoped sibling or rewrite its own scope.
-- `edit_user`, `delete_user`, `promote_user`, and `remove_user` **on its own account**, so it can't change the account's email or password and then log in with a full cookie session.
+- `edit_user`, `delete_user`, `promote_user`, and `remove_user` on **its own account**, and on **any account that can do more than the scope allows**. Otherwise it could change that account's email or password, then log in with a full cookie session.
+- Assigning a role it couldn't exercise itself, when creating or promoting a user. That covers the site's default role too: a user created without one gets no role if the default is out of scope.
 - On multisite, a password with a role limit or denied groups is removed from `site_admins` for that request, because `is_super_admin()` skips `map_meta_cap`. The technique is borrowed from [t3admin](https://github.com/georgestephanis/t3admin).
 - Over XML-RPC, which has no read/write metadata, a password with request-level restrictions fails authentication instead of being silently under-enforced.
 
 A password can always `GET …/application-passwords/introspect`, so the client can discover what it was actually granted.
 
+### Deactivating the plugin removes every restriction
+
+Core doesn't know about scopes. If this plugin is deactivated, every scoped password silently goes back to its owner's full access. The Plugins screen warns about this whenever scoped passwords exist. A plugin can't fix it, which makes it the strongest argument for doing this in core ([#13](https://github.com/georgestephanis/application-passwords-scoped/issues/13)).
+
 ## Interfaces
 
 **Authorize Application flow.** An app can *request* a scope in the authorize URL. The person approving sees it pre-filled and can change it before approving:
 
-```
+```text
 /wp-admin/authorize-application.php?app_name=My+Agent
     &scope[roles][]=author&scope[roles][]=wpseo_manager
     &scope[deny][]=plugins&scope[deny][]=users
@@ -127,6 +132,7 @@ Almost everything was possible with existing hooks, which is a credit to the 5.6
 - [#5](https://github.com/georgestephanis/application-passwords-scoped/issues/5) `is_super_admin()` needs a filter
 - [#6](https://github.com/georgestephanis/application-passwords-scoped/issues/6) Read-only scopes need route-level `readonly` annotations
 - [#7](https://github.com/georgestephanis/application-passwords-scoped/issues/7) Standard authorize-flow protocol for requesting and reporting scopes
+- [#13](https://github.com/georgestephanis/application-passwords-scoped/issues/13) Deactivating the plugin silently removes every restriction
 
 ## Open questions
 
@@ -137,12 +143,15 @@ Provisional design decisions are tracked as sub-issues of [#2](https://github.co
 - [#10](https://github.com/georgestephanis/application-passwords-scoped/issues/10) Capability group granularity and plugin-registered groups
 - [#11](https://github.com/georgestephanis/application-passwords-scoped/issues/11) Default scopes for new passwords (e.g. AI agents)
 - [#12](https://github.com/georgestephanis/application-passwords-scoped/issues/12) Granter cap: semantics when the granter changes or is deleted
+- [#14](https://github.com/georgestephanis/application-passwords-scoped/issues/14) Audit enforcement for bypass paths
+- [#15](https://github.com/georgestephanis/application-passwords-scoped/issues/15) Document how plugin capabilities interact with scopes
 
 ## Development
 
 ```bash
-composer install
-composer phpcs        # lint
+composer install && npm ci --ignore-scripts
+composer lint:php     # WordPress Coding Standards + PHP 7.4 compatibility
+npm run lint          # @wordpress/scripts: JS, CSS, package.json, docs
 tests/smoke.sh        # end-to-end tests against WordPress Playground
 ```
 

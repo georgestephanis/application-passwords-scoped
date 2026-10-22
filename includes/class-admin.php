@@ -32,6 +32,8 @@ class Admin {
 		add_filter( 'manage_application-passwords-user_columns', array( __CLASS__, 'columns' ) );
 		add_action( 'manage_application-passwords-user_custom_column', array( __CLASS__, 'column' ), 10, 2 );
 		add_action( 'manage_application-passwords-user_custom_column_js_template', array( __CLASS__, 'column_js_template' ) );
+
+		add_action( 'after_plugin_row_' . plugin_basename( FILE ), array( __CLASS__, 'deactivation_warning' ), 10, 0 );
 	}
 
 	/**
@@ -381,6 +383,50 @@ class Admin {
 		}
 
 		return $data;
+	}
+
+	/**
+	 * Warn on the Plugins screen that deactivating fails open: core doesn't know about scopes, so
+	 * every scoped password silently regains its owner's full access. See issue #13.
+	 */
+	public static function deactivation_warning() {
+		if ( ! is_plugin_active( plugin_basename( FILE ) ) ) {
+			return;
+		}
+
+		$query = new \WP_User_Query(
+			array(
+				'blog_id'     => 0,
+				'meta_key'    => Scope_Store::META_KEY, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- Plugins screen only.
+				'fields'      => 'ID',
+				'number'      => 1,
+				'count_total' => true,
+			)
+		);
+		$count = $query->get_total();
+
+		if ( ! $count ) {
+			return;
+		}
+
+		$columns = _get_list_table( 'WP_Plugins_List_Table' )->get_column_count();
+		?>
+		<tr class="plugin-update-tr active">
+			<td colspan="<?php echo (int) $columns; ?>" class="plugin-update colspanchange">
+				<div class="notice inline notice-warning notice-alt">
+					<p>
+						<?php
+						printf(
+							/* translators: %s: number of users. */
+							esc_html( _n( '%s user has scoped application passwords. Deactivating this plugin removes every restriction from them, giving those passwords full access to their accounts. Revoke them first if that is not what you want.', '%s users have scoped application passwords. Deactivating this plugin removes every restriction from them, giving those passwords full access to their accounts. Revoke them first if that is not what you want.', $count, 'application-passwords-scoped' ) ),
+							esc_html( number_format_i18n( $count ) )
+						);
+						?>
+					</p>
+				</div>
+			</td>
+		</tr>
+		<?php
 	}
 
 	/**
