@@ -1,0 +1,48 @@
+.app-password-scope {
+	margin: 1em 0;
+	max-width: 48em;
+}
+
+.app-password-scope > summary {
+	cursor: pointer;
+	font-weight: 600;
+}
+
+.app-password-scope fieldset {
+	margin: 1em 0;
+}
+
+.app-password-scope legend {
+	font-weight: 600;
+	margin-bottom: 0.5em;
+}
+
+.app-password-scope label {
+	display: block;
+	margin: 0.25em 0;
+}
+
+.app-password-scope-groups {
+	display: grid;
+	grid-template-columns: repeat( auto-fill, minmax( 15em, 1fr ) );
+	gap: 0 1em;
+}
+
+.app-password-scope-abilities {
+	max-height: 12em;
+	overflow-y: auto;
+	padding: 0.25em 0.5em;
+	border: 1px solid #dcdcde;
+	background: #fff;
+}
+
+.app-password-scope-abilities.is-disabled {
+	opacity: 0.5;
+	pointer-events: none;
+}
+
+.app-password-scope-requested {
+	padding: 0.5em 0.75em;
+	border-left: 4px solid #72aee6;
+	background: #f0f6fc;
+}

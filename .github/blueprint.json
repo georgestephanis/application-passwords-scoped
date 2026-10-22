@@ -1,0 +1,39 @@
+{
+    "$schema": "https://playground.wordpress.net/blueprint-schema.json",
+    "landingPage": "/wp-admin/authorize-application.php?app_name=Demo+Agent&scope[role]=author&scope[deny][]=plugins&scope[deny][]=users&scope[abilities_only]=1&scope[expires_in]=86400",
+    "preferredVersions": {
+        "php": "8.2",
+        "wp": "latest"
+    },
+    "steps": [
+        {
+            "step": "login",
+            "username": "admin",
+            "password": "password"
+        },
+        {
+            "step": "installPlugin",
+            "pluginData": {
+                "resource": "git:directory",
+                "url": "https://github.com/georgestephanis/application-passwords-scoped",
+                "ref": "HEAD",
+                "path": "/"
+            },
+            "options": {
+                "activate": true,
+                "targetFolderName": "application-passwords-scoped"
+            }
+        },
+        {
+            "step": "setSiteOptions",
+            "options": {
+                "blogname": "Scoped App Passwords Demo",
+                "permalink_structure": "/%postname%/"
+            }
+        },
+        {
+            "step": "runPHP",
+            "code": "<?php require '/wordpress/wp-load.php'; include_once WP_PLUGIN_DIR . '/application-passwords-scoped/.github/setup.php';"
+        }
+    ]
+}
