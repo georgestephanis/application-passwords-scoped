@@ -148,6 +148,22 @@ NEW_ROLES="$("${CURL[@]}" -u "admin:$(pw nopublish)" -H 'Content-Type: applicati
 m=re.search(r'\{.*\}', sys.stdin.read(), re.S); print(','.join(json.loads(m.group(0)).get('roles', ['?'])))")"
 if [ -z "$NEW_ROLES" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL default-role user should get no role, got '$NEW_ROLES'"; fi
 
+# Bypass paths (#14).
+# 1. A plugin's early rest_pre_dispatch short-circuit can't return a response past the read-only
+#    gate, even when it overwrites our error.
+expect full     POST /aps-test/v1/short-circuit ok
+expect readonly POST /aps-test/v1/short-circuit "$OOS"
+# 2. Non-REST endpoints that accept app passwords: capability scopes apply, and passwords with
+#    request-level scopes are refused rather than let through unchecked.
+custom() { "${CURL[@]}" -u "admin:$(pw "$1")" "$URL/?aps_custom=$2" | grep -o '{.*}'; }
+check() { if [ "$2" = "$3" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL $1: expected $3, got $2"; fi; }
+check "custom endpoint, unscoped"           "$(custom full activate_plugins)"      '{"user":1,"can":true}'
+check "custom endpoint, capability scope"   "$(custom noplugins activate_plugins)" '{"user":1,"can":false}'
+check "custom endpoint, read-only refused"  "$(custom readonly read)"              '{"user":0,"can":false}'
+# 3. Authenticating on a REST URL before REST_REQUEST is defined still works, and gates still run.
+expect readonly GET  /aps-test/v1/can/read ok
+expect readonly POST /aps-test/v1/short-circuit "$OOS"
+
 # Denied groups (plugins, users).
 expect noplugins GET  /wp/v2/plugins rest_cannot_view_plugins
 expect noplugins POST /wp/v2/settings ok '{"blogname":"Smoke"}'
@@ -179,6 +195,16 @@ xmlrpc() {
 }
 if xmlrpc noplugins | grep -q 'Software Name'; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL xmlrpc noplugins should authenticate"; fi
 if xmlrpc readonly | grep -q 'faultCode'; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL xmlrpc readonly should be refused"; fi
+
+# Deactivation suspends scoped passwords instead of unlocking them; reactivation restores them
+# (#13). Runs last because it changes plugin state.
+"${CURL[@]}" "$URL/?aps_toggle=deactivate" > /dev/null
+expect_can full      read             true
+expect noplugins GET /aps-test/v1/can/read 'incorrect_password|rest_not_logged_in'
+"${CURL[@]}" "$URL/?aps_toggle=activate" > /dev/null
+expect_can noplugins read             true
+expect_can noplugins activate_plugins false
+expect_can full      activate_plugins true
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

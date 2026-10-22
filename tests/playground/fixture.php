@@ -33,6 +33,79 @@ add_action(
 	}
 );
 
+// GET /?aps_toggle=activate|deactivate runs the plugin's real (de)activation hooks (issue #13).
+add_action(
+	'init',
+	static function () {
+		if ( empty( $_GET['aps_toggle'] ) ) {
+			return;
+		}
+		require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		$plugin  = 'application-passwords-scoped/application-passwords-scoped.php';
+		$network = is_multisite() && ! empty( $_GET['network'] );
+		if ( $network ) {
+			wp_set_current_user( 1 ); // Network activation needs a super admin.
+			update_site_option( 'site_admins', array( 'admin' ) );
+		}
+		if ( 'deactivate' === $_GET['aps_toggle'] ) {
+			deactivate_plugins( $plugin, false, $network );
+		} else {
+			activate_plugin( $plugin, '', $network );
+		}
+		wp_send_json( array( 'active' => is_plugin_active( $plugin ) ) );
+	},
+	1
+);
+
+// Bypass probes for issue #14.
+
+// 1. Another plugin short-circuits a route from rest_pre_dispatch, at an early priority, and
+// (badly) ignores any result an earlier filter already returned.
+add_filter(
+	'rest_pre_dispatch',
+	static function ( $result, $server, $request ) {
+		if ( '/aps-test/v1/short-circuit' === $request->get_route() ) {
+			return new WP_REST_Response( array( 'short_circuited' => true ) );
+		}
+		return $result;
+	},
+	-1000,
+	3
+);
+
+// 2. A plugin endpoint outside REST that opts into app-password auth.
+// GET /?aps_custom=<cap> → { "user": id, "can": bool }.
+add_filter(
+	'application_password_is_api_request',
+	static function ( $is_api ) {
+		return $is_api || isset( $_GET['aps_custom'] ) || false !== strpos( $_SERVER['REQUEST_URI'] ?? '', '/wp-json/aps-test/' ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- Test fixture.
+	}
+);
+add_action(
+	'template_redirect',
+	static function () {
+		if ( isset( $_GET['aps_custom'] ) ) {
+			wp_send_json(
+				array(
+					'user' => get_current_user_id(),
+					'can'  => current_user_can( sanitize_key( $_GET['aps_custom'] ) ),
+				)
+			);
+		}
+	}
+);
+
+// 3. Something resolves the current user on a REST URL before core defines REST_REQUEST.
+add_action(
+	'init',
+	static function () {
+		if ( false !== strpos( $_SERVER['REQUEST_URI'] ?? '', '/wp-json/aps-test/' ) ) { // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- Test fixture.
+			get_current_user_id();
+		}
+	},
+	0
+);
+
 add_action(
 	'init',
 	static function () {

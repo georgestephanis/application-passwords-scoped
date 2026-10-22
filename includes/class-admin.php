@@ -34,6 +34,7 @@ class Admin {
 		add_action( 'manage_application-passwords-user_custom_column_js_template', array( __CLASS__, 'column_js_template' ) );
 
 		add_action( 'after_plugin_row_' . plugin_basename( FILE ), array( __CLASS__, 'deactivation_warning' ), 10, 0 );
+		add_action( 'delete_user_form', array( __CLASS__, 'delete_user_warning' ), 10, 2 );
 	}
 
 	/**
@@ -386,8 +387,8 @@ class Admin {
 	}
 
 	/**
-	 * Warn on the Plugins screen that deactivating fails open: core doesn't know about scopes, so
-	 * every scoped password silently regains its owner's full access. See issue #13.
+	 * Tell people on the Plugins screen what deactivating does to scoped passwords (see Lifecycle,
+	 * issue #13): they stop working until the plugin is reactivated.
 	 */
 	public static function deactivation_warning() {
 		if ( ! is_plugin_active( plugin_basename( FILE ) ) ) {
@@ -418,7 +419,7 @@ class Admin {
 						<?php
 						printf(
 							/* translators: %s: number of users. */
-							esc_html( _n( '%s user has scoped application passwords. Deactivating this plugin removes every restriction from them, giving those passwords full access to their accounts. Revoke them first if that is not what you want.', '%s users have scoped application passwords. Deactivating this plugin removes every restriction from them, giving those passwords full access to their accounts. Revoke them first if that is not what you want.', $count, 'application-passwords-scoped' ) ),
+							esc_html( _n( '%s user has scoped application passwords. Deactivating this plugin suspends them: they stop working until it is reactivated. Clear their restrictions first if you want them to keep working with full access.', '%s users have scoped application passwords. Deactivating this plugin suspends them: they stop working until it is reactivated. Clear their restrictions first if you want them to keep working with full access.', $count, 'application-passwords-scoped' ) ),
 							esc_html( number_format_i18n( $count ) )
 						);
 						?>
@@ -426,6 +427,65 @@ class Admin {
 				</div>
 			</td>
 		</tr>
+		<?php
+	}
+
+	/**
+	 * On the delete-user confirmation screen, list other users' passwords that the users being
+	 * deleted granted. Those passwords fail closed once their granter is gone (issue #12), which
+	 * could break an integration without warning.
+	 *
+	 * @param \WP_User $current_user User doing the deleting.
+	 * @param int[]    $user_ids     Users being deleted.
+	 */
+	public static function delete_user_warning( $current_user, $user_ids ) {
+		$affected = array_values(
+			array_filter(
+				Scope_Store::granted_by( (array) $user_ids ),
+				static function ( $row ) use ( $user_ids ) {
+					// A deleted user's own passwords go with them; only list other users' passwords.
+					return ! in_array( $row['user_id'], array_map( 'intval', (array) $user_ids ), true );
+				}
+			)
+		);
+
+		if ( ! $affected ) {
+			return;
+		}
+		?>
+		<div class="notice notice-warning inline">
+			<p>
+				<?php
+				printf(
+					/* translators: %s: number of application passwords. */
+					esc_html( _n( '%s application password was created for another user by someone you are deleting. It will stop working, because a password can never do more than the person who granted it:', '%s application passwords were created for other users by someone you are deleting. They will stop working, because a password can never do more than the person who granted it:', count( $affected ), 'application-passwords-scoped' ) ),
+					esc_html( number_format_i18n( count( $affected ) ) )
+				);
+				?>
+			</p>
+			<ul class="ul-disc">
+				<?php foreach ( $affected as $row ) : ?>
+					<?php
+					$owner = get_userdata( $row['user_id'] );
+					$item  = \WP_Application_Passwords::get_user_application_password( $row['user_id'], $row['uuid'] );
+					if ( ! $owner || ! $item ) {
+						continue;
+					}
+					?>
+					<li>
+						<?php
+						printf(
+							/* translators: 1: application password name, 2: owner's display name. */
+							esc_html__( '"%1$s" for %2$s', 'application-passwords-scoped' ),
+							esc_html( $item['name'] ),
+							'<a href="' . esc_url( get_edit_user_link( $owner->ID ) . '#application-passwords-section' ) . '">' . esc_html( $owner->display_name ) . '</a>'
+						);
+						?>
+					</li>
+				<?php endforeach; ?>
+			</ul>
+			<p><?php esc_html_e( 'To keep one working, revoke it and have the user, or another administrator, create a replacement before you delete this account.', 'application-passwords-scoped' ); ?></p>
+		</div>
 		<?php
 	}
 

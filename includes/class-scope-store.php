@@ -65,6 +65,39 @@ class Scope_Store {
 	}
 
 	/**
+	 * Passwords, belonging to anyone, that were granted by any of the given users.
+	 *
+	 * @param int[] $granter_ids User IDs.
+	 * @return array<int, array{user_id: int, uuid: string, granted_by: int}>
+	 */
+	public static function granted_by( array $granter_ids ) {
+		$granter_ids = array_map( 'intval', $granter_ids );
+		$found       = array();
+		$owners      = get_users(
+			array(
+				'blog_id'  => 0,
+				'meta_key' => self::META_KEY, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- Only on the delete-user screen.
+				'fields'   => 'ID',
+			)
+		);
+
+		foreach ( $owners as $owner_id ) {
+			foreach ( self::all( (int) $owner_id ) as $uuid => $data ) {
+				$granter = (int) ( $data['granted_by'] ?? 0 );
+				if ( in_array( $granter, $granter_ids, true ) ) {
+					$found[] = array(
+						'user_id'    => (int) $owner_id,
+						'uuid'       => $uuid,
+						'granted_by' => $granter,
+					);
+				}
+			}
+		}
+
+		return $found;
+	}
+
+	/**
 	 * Raw stored scopes for a user.
 	 *
 	 * @param int $user_id User ID.

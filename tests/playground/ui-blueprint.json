@@ -22,7 +22,7 @@
         },
         {
             "step": "runPHP",
-            "code": "<?php require '/wordpress/wp-load.php'; include WP_PLUGIN_DIR . '/application-passwords-scoped/.github/setup.php'; $eddie = get_userdata( wp_insert_user( array( 'user_login' => 'eddie', 'user_pass' => wp_generate_password(), 'user_email' => 'eddie@example.test', 'display_name' => 'Eddie (Editor)', 'role' => 'editor' ) ) ); $eddie->add_role( 'seo_manager' ); add_role( 'newsletter_editor', 'Newsletter Editor (demo)', array( 'read' => true, 'manage_newsletter' => true ) ); $eddie->add_role( 'newsletter_editor' );"
+            "code": "<?php require '/wordpress/wp-load.php'; include WP_PLUGIN_DIR . '/application-passwords-scoped/.github/setup.php'; $eddie = get_userdata( wp_insert_user( array( 'user_login' => 'eddie', 'user_pass' => wp_generate_password(), 'user_email' => 'eddie@example.test', 'display_name' => 'Eddie (Editor)', 'role' => 'editor' ) ) ); $eddie->add_role( 'seo_manager' ); add_role( 'newsletter_editor', 'Newsletter Editor (demo)', array( 'read' => true, 'manage_newsletter' => true ) ); $eddie->add_role( 'newsletter_editor' ); $ada = get_userdata( wp_insert_user( array( 'user_login' => 'ada', 'user_pass' => wp_generate_password(), 'user_email' => 'ada@example.test', 'display_name' => 'Ada (Admin)', 'role' => 'administrator' ) ) ); wp_set_current_user( $ada->ID ); $made = WP_Application_Passwords::create_new_application_password( $eddie->ID, array( 'name' => 'Newsletter sync (set up by Ada)' ) ); wp_set_current_user( 0 );"
         }
     ]
 }

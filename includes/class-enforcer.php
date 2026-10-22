@@ -16,9 +16,14 @@ use WP_Error;
  *    to its primitive caps, and if any of them falls outside the scope the check gets
  *    `do_not_allow`. This is the backbone — it covers REST, XML-RPC, Abilities, and any plugin
  *    code that calls `current_user_can()`, and `do_not_allow` beats even multisite super admins.
- * 2. Requests (`rest_pre_dispatch`): coarse gates that aren't expressible as capabilities —
- *    read-only (HTTP method) and abilities-only (route namespace). Runs per sub-request in
- *    `/batch/v1` too.
+ * 2. Requests: coarse gates that aren't expressible as capabilities — read-only (HTTP method)
+ *    and abilities-only (route namespace). Checked twice: first thing in `rest_pre_dispatch`, so a
+ *    plugin's own short-circuit handler can't run first, and last thing in
+ *    `rest_request_before_callbacks`, immediately before the route's permission and callback, so
+ *    no other filter can override it. Both run per sub-request in `/batch/v1` too. A plugin that
+ *    short-circuits `rest_pre_dispatch` while ignoring an existing result can still run its own
+ *    code, which nothing outside it can prevent. `rest_post_dispatch` replaces its response with
+ *    the error, though, so out-of-scope data never reaches the client.
  * 3. Abilities (`wp_ability_permission_result`): an allowlist of ability names, and read-only
  *    passwords may only run abilities annotated `readonly`.
  */
@@ -66,7 +71,9 @@ class Enforcer {
 		add_filter( 'map_meta_cap', array( __CLASS__, 'map_meta_cap' ), PHP_INT_MAX, 4 );
 		add_filter( 'editable_roles', array( __CLASS__, 'editable_roles' ), PHP_INT_MAX );
 		add_filter( 'rest_pre_insert_user', array( __CLASS__, 'default_role_for_new_user' ), PHP_INT_MAX );
-		add_filter( 'rest_pre_dispatch', array( __CLASS__, 'rest_pre_dispatch' ), 10, 3 );
+		add_filter( 'rest_pre_dispatch', array( __CLASS__, 'rest_pre_dispatch' ), PHP_INT_MIN, 3 );
+		add_filter( 'rest_request_before_callbacks', array( __CLASS__, 'rest_before_callbacks' ), PHP_INT_MAX, 3 );
+		add_filter( 'rest_post_dispatch', array( __CLASS__, 'rest_post_dispatch' ), PHP_INT_MAX, 3 );
 		add_filter( 'wp_ability_permission_result', array( __CLASS__, 'ability_permission' ), 10, 4 );
 		add_action( 'wp_delete_application_password', array( __CLASS__, 'cleanup' ), 10, 2 );
 		add_action( 'wp_create_application_password', array( __CLASS__, 'record_granter' ), 10, 2 );
@@ -118,9 +125,11 @@ class Enforcer {
 	 *
 	 * - Expired passwords fail like a wrong password would. Checking here, lazily, means no cron
 	 *   job is needed and a missed cron can't leave a password alive.
-	 * - XML-RPC has no per-method read/write metadata and isn't part of the Abilities API, so
-	 *   request-level restrictions can't be enforced there. Refuse rather than silently ignore
-	 *   them. Role ceilings and denied groups are pure capability rules and work over XML-RPC.
+	 * - Request-level restrictions (read-only, abilities) can only be enforced on the REST API.
+	 *   XML-RPC has no per-method read/write metadata, and plugins can opt their own endpoints
+	 *   into application-password auth with `application_password_is_api_request`. On anything
+	 *   but REST, refuse rather than silently ignore them. Role limits and denied groups are pure
+	 *   capability rules, so they work everywhere.
 	 *
 	 * @param WP_Error $error Error object to add to.
 	 * @param \WP_User $user  User.
@@ -136,13 +145,43 @@ class Enforcer {
 			);
 		}
 
-		if ( defined( 'XMLRPC_REQUEST' ) && XMLRPC_REQUEST
-			&& ( $scope->read_only || $scope->abilities_only || null !== $scope->abilities ) ) {
+		if ( ! self::is_rest_bound() && ( $scope->read_only || $scope->abilities_only || null !== $scope->abilities ) ) {
 			$error->add(
-				'application_password_scope_xmlrpc',
+				'application_password_scope_rest_only',
 				__( 'This application password is restricted to the REST API.', 'application-passwords-scoped' )
 			);
 		}
+	}
+
+	/**
+	 * Whether the current request will be served by the REST API, where the request gates run.
+	 *
+	 * Core authenticates app passwords on REST, on XML-RPC, and on any endpoint a plugin approves
+	 * through `application_password_is_api_request`. Plugins commonly approve REST URLs before
+	 * core has defined REST_REQUEST, so the constant alone would reject real REST requests. The
+	 * URL is checked as well: if it routes to the REST API, the gates will still see it.
+	 *
+	 * @return bool
+	 */
+	private static function is_rest_bound() {
+		if ( defined( 'XMLRPC_REQUEST' ) && XMLRPC_REQUEST ) {
+			return false;
+		}
+
+		if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+			return true;
+		}
+
+		// phpcs:disable WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput -- Routing check only; nothing is stored or output.
+		if ( isset( $_GET['rest_route'] ) ) {
+			return true;
+		}
+
+		$path   = isset( $_SERVER['REQUEST_URI'] ) ? (string) wp_parse_url( wp_unslash( $_SERVER['REQUEST_URI'] ), PHP_URL_PATH ) : '';
+		$prefix = trailingslashit( wp_parse_url( get_rest_url(), PHP_URL_PATH ) );
+		// phpcs:enable
+
+		return '' !== $path && 0 === strpos( trailingslashit( $path ), $prefix );
 	}
 
 	/**
@@ -295,8 +334,55 @@ class Enforcer {
 	 * @return mixed
 	 */
 	public static function rest_pre_dispatch( $result, $server, $request ) {
-		if ( null !== $result || ! self::$scope || get_current_user_id() !== self::$user_id ) {
+		if ( null !== $result ) {
 			return $result;
+		}
+
+		return self::check_request( $request );
+	}
+
+	/**
+	 * Final request gate, immediately before the route's permission callback and handler.
+	 *
+	 * @param mixed            $response Response so far; a WP_Error stops the request.
+	 * @param array            $handler  Route handler.
+	 * @param \WP_REST_Request $request  Request.
+	 * @return mixed
+	 */
+	public static function rest_before_callbacks( $response, $handler, $request ) {
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$error = self::check_request( $request );
+
+		return $error ? $error : $response;
+	}
+
+	/**
+	 * Last line of defense: never return a response for an out-of-scope request, even if another
+	 * filter replaced our error with one.
+	 *
+	 * @param \WP_HTTP_Response $response Response.
+	 * @param \WP_REST_Server   $server   Server.
+	 * @param \WP_REST_Request  $request  Request.
+	 * @return \WP_HTTP_Response
+	 */
+	public static function rest_post_dispatch( $response, $server, $request ) {
+		$error = self::check_request( $request );
+
+		return $error ? rest_convert_error_to_response( $error ) : $response;
+	}
+
+	/**
+	 * Apply read-only and abilities-only to a REST request.
+	 *
+	 * @param \WP_REST_Request $request Request.
+	 * @return WP_Error|null Error if the request is out of scope, otherwise null.
+	 */
+	private static function check_request( $request ) {
+		if ( ! self::$scope || get_current_user_id() !== self::$user_id ) {
+			return null;
 		}
 
 		$route  = untrailingslashit( $request->get_route() );
@@ -304,7 +390,7 @@ class Enforcer {
 
 		// Always let a password introspect itself so the client can discover what it was granted.
 		if ( 'GET' === $method && preg_match( '#^/wp/v2/users/(me|\d+)/application-passwords/introspect$#', $route ) ) {
-			return $result;
+			return null;
 		}
 
 		if ( self::$scope->abilities_only && 0 !== strpos( $route . '/', '/wp-abilities/v1/' ) ) {
@@ -315,7 +401,7 @@ class Enforcer {
 			return self::error( __( 'This application password is read-only.', 'application-passwords-scoped' ) );
 		}
 
-		return $result;
+		return null;
 	}
 
 	/**

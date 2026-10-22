@@ -32,11 +32,15 @@ includes/
 │                                  password UUID. Unrestricted scopes are deleted, not stored.
 ├── class-enforcer.php             Runtime enforcement hooks (see below). Holds per-request state.
 ├── class-rest.php                 `scope` field on core's /wp/v2/users/<id>/application-passwords.
-├── class-admin.php                Profile + Authorize Application form fields, list-table column.
+├── class-admin.php                Profile + Authorize Application form fields, list-table column,
+│                                  Plugins-screen and delete-user warnings.
+├── class-lifecycle.php            Suspends scoped passwords on deactivation, restores on activation.
 └── class-cli.php                  `wp application-password scope get|set|clear|groups`.
 assets/admin.js                    Adds `scope` to core's JS REST requests via wp.hooks filters.
 assets/admin.css
 tests/smoke.sh                     End-to-end test against WordPress Playground (see Testing).
+tests/multisite.sh                 Multisite/super-admin test, on its own Playground network.
+docs/plugin-authors.md             How plugin capabilities, roles, routes and abilities meet scopes.
 tests/playground/                  Test-only blueprint + mu-plugin fixture. Never shipped.
 .github/blueprint.json             Public "Open in Playground" demo.
 .github/setup.php                  Demo data for that blueprint (example scoped passwords, roles).
@@ -54,16 +58,20 @@ Everything hangs off hooks core already ships. Don't patch or replace core behav
 | Hook | Class | Purpose |
 | --- | --- | --- |
 | `application_password_did_authenticate` | Enforcer | Record which password authenticated and load its scope. |
-| `wp_authenticate_application_password_errors` | Enforcer | Fail auth for expired passwords, and for request-level scopes over XML-RPC. |
+| `wp_authenticate_application_password_errors` | Enforcer | Fail auth for expired passwords, and for request-level scopes anywhere but REST (XML-RPC, plugin endpoints). |
 | `map_meta_cap` @ `PHP_INT_MAX` | Enforcer | Return `do_not_allow` if any required primitive cap is out of scope. The backbone. |
 | `editable_roles` | Enforcer | Hide roles the scope couldn't exercise, so a scoped password can't create or promote users into them. |
 | `rest_pre_insert_user` | Enforcer | A user created without `roles` gets no role if `default_role` is out of scope. |
 | `site_option_site_admins` | Enforcer | Drop a cap-limited user from super admins for the request (`is_super_admin()` skips `map_meta_cap`). |
-| `rest_pre_dispatch` | Enforcer | Read-only (HTTP method) and abilities-only (route) gates. Also runs per `/batch/v1` sub-request. |
+| `rest_pre_dispatch` @ `PHP_INT_MIN` | Enforcer | Read-only (HTTP method) and abilities-only (route) gates, before any plugin can short-circuit. Also runs per `/batch/v1` sub-request. |
+| `rest_request_before_callbacks` @ `PHP_INT_MAX` | Enforcer | The same gates again, immediately before the route's permission callback and handler. |
+| `rest_post_dispatch` @ `PHP_INT_MAX` | Enforcer | The same gates on the way out, so an out-of-scope response is never returned, even if a plugin overrode the error. |
 | `wp_ability_permission_result` | Enforcer | Ability allowlist; read-only passwords only run `readonly`-annotated abilities. |
 | `wp_create_application_password` | Enforcer, Admin | Record `granted_by` when one user creates a password for another; no-JS authorize form. |
 | `wp_delete_application_password` | Enforcer | Delete the scope with its password. |
-| `after_plugin_row_<plugin>` | Admin | Warn that deactivating removes every restriction (fails open, see #13). |
+| `after_plugin_row_<plugin>` | Admin | Warn that deactivating suspends scoped passwords (#13). |
+| `delete_user_form` | Admin | List passwords the deleted user granted, which will stop working (#12). |
+| activation / deactivation | Lifecycle | Restore / suspend scoped passwords' hashes (#13). Network-wide on multisite. |
 
 Enforcement only applies when `$user_id` matches the user the active password authenticated as.
 Checks against other users pass through untouched. `Scope::allows_cap()` calls `user_can()` on the
@@ -143,6 +151,19 @@ XML-RPC. `fixture.php` also registers `GET /wp-json/aps-test/v1/can/<cap>`, whic
 **Add a smoke assertion for every behavior change.** Use `expect` for REST error codes and
 `expect_can` for capability checks. The suite must end `N passed, 0 failed`.
 
+### Automated: `tests/multisite.sh`
+
+```bash
+tests/multisite.sh      # its own network on :9401, ~1–2 min
+```
+
+Multisite refuses non-default ports, so the server runs with
+`--site-url=http://aps-multisite.localhost` and curl uses `--connect-to` to reach port 9401. The
+blueprint converts the site to a network in PHP: the `enableMultisite` step downloads
+`wp-cli.phar` from playground.wordpress.net, which isn't always reachable. The plugin is
+network-activated from inside a request (`?aps_toggle=activate&network=1`), because activating it
+from a blueprint step doesn't persist on a freshly converted network.
+
 ### Manual: browsing the admin UI
 
 ```bash
@@ -202,6 +223,7 @@ installs the plugin from GitHub, so it tests `trunk`, not your working tree.
 
 - Default branch `trunk`. For anything non-trivial, branch and open a PR that links the issue.
 - Before committing: `composer lint:php` and `npm run lint` are clean, and `tests/smoke.sh` passes.
+  Run `tests/multisite.sh` too for anything touching capabilities, roles or super admins.
 - If you change the admin UI, check it in a browser (see Manual testing). Update the README
   screenshot in `.github/screenshots/` if it's now out of date.
 - Record design decisions and newly found core gaps as issues, not in the README. The README links

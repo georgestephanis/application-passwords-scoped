@@ -1,0 +1,25 @@
+{
+    "$schema": "https://playground.wordpress.net/blueprint-schema.json",
+    "preferredVersions": {
+        "php": "8.3",
+        "wp": "latest"
+    },
+    "steps": [
+        {
+            "step": "runPHP",
+            "code": "<?php require '/wordpress/wp-load.php'; require_once ABSPATH . 'wp-admin/includes/upgrade.php'; wp_set_current_user( 1 ); global $wpdb; foreach ( $wpdb->tables( 'ms_global' ) as $t => $prefixed ) { $wpdb->$t = $prefixed; } install_network(); $r = populate_network( 1, 'aps-multisite.localhost', 'admin@example.test', 'APS Network', '/', false ); if ( is_wp_error( $r ) && 'no_wildcard_dns' !== $r->get_error_code() ) { throw new Exception( $r->get_error_message() ); }"
+        },
+        {
+            "step": "defineWpConfigConsts",
+            "consts": {
+                "WP_ALLOW_MULTISITE": true,
+                "MULTISITE": true,
+                "SUBDOMAIN_INSTALL": false,
+                "DOMAIN_CURRENT_SITE": "aps-multisite.localhost",
+                "PATH_CURRENT_SITE": "/",
+                "SITE_ID_CURRENT_SITE": 1,
+                "BLOG_ID_CURRENT_SITE": 1
+            }
+        }
+    ]
+}

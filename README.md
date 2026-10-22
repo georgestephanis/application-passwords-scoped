@@ -75,7 +75,7 @@ A scoped password could otherwise free itself. Any password with *any* restricti
 - `create_app_password`, `edit_app_password`, and `delete_app_password(s)`, so it can't mint an unscoped sibling or rewrite its own scope.
 - `edit_user`, `delete_user`, `promote_user`, and `remove_user` on **its own account**, and on **any account that can do more than the scope allows**. Otherwise it could change that account's email or password, then log in with a full cookie session.
 - Assigning a role it couldn't exercise itself, when creating or promoting a user. That covers the site's default role too: a user created without one gets no role if the default is out of scope.
-- On multisite, a password with a role limit or denied groups is removed from `site_admins` for that request, because `is_super_admin()` skips `map_meta_cap`. The technique is borrowed from [t3admin](https://github.com/georgestephanis/t3admin).
+- On multisite, a password with a role limit or denied groups is removed from `site_admins` for that request, because `is_super_admin()` skips `map_meta_cap`. That's all-or-nothing: denying even one group drops *all* network powers, and the password keeps only the user's role on the site. The technique is borrowed from [t3admin](https://github.com/georgestephanis/t3admin). `tests/multisite.sh` covers it.
 - Over XML-RPC, which has no read/write metadata, a password with request-level restrictions fails authentication instead of being silently under-enforced.
 
 A password can always `GET …/application-passwords/introspect`, so the client can discover what it was actually granted.

@@ -9,6 +9,7 @@
  * Author:            George Stephanis
  * License:           GPL-2.0-or-later
  * Text Domain:       application-passwords-scoped
+ * Network:           true
  *
  * @package Application_Passwords_Scoped
  */
@@ -26,6 +27,12 @@ require_once __DIR__ . '/includes/class-scope-store.php';
 require_once __DIR__ . '/includes/class-enforcer.php';
 require_once __DIR__ . '/includes/class-rest.php';
 require_once __DIR__ . '/includes/class-admin.php';
+require_once __DIR__ . '/includes/class-lifecycle.php';
+
+// Scoped passwords are suspended while the plugin is inactive, rather than silently regaining full
+// access. Network-only on multisite: scopes are per user, and users span the whole network.
+register_activation_hook( __FILE__, array( __NAMESPACE__ . '\\Lifecycle', 'activate' ) );
+register_deactivation_hook( __FILE__, array( __NAMESPACE__ . '\\Lifecycle', 'deactivate' ) );
 
 Enforcer::init();
 REST::init();
