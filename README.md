@@ -6,7 +6,7 @@
 
 When Application Passwords [merged into core in 5.6](https://make.wordpress.org/core/2020/11/05/application-passwords-integration-guide/), scoping individual passwords was explicitly left as a follow-up. Today, every application password carries the full power of the user who made it. If an administrator connects a blog client, a read-only dashboard, and an AI agent, all three can install plugins.
 
-This plugin is a working prototype of what scoping could look like. It is built only on hooks core already ships, so it doubles as a test of whether those hooks are enough. They almost are (see [What core would need](#what-core-would-need)).
+This plugin is a working prototype of what scoping could look like. It is built only on hooks core already ships, so it doubles as a test of whether those hooks are enough. They almost are: see [What core would need](#what-core-would-need), and [docs/core-gaps.md](docs/core-gaps.md) for which gaps have workarounds.
 
 ## Restriction types
 
@@ -18,7 +18,7 @@ Every restriction only removes access. A scope can never give a password more th
 | **Denied capability groups** | "Never: manage plugins, manage users" | `map_meta_cap` |
 | **Read-only** | REST `GET`/`HEAD`/`OPTIONS` (the effective method, after `_method` overrides), XML-RPC `get*` methods, and anything a plugin declares read-only, such as a GraphQL query | REST dispatch filters, XML-RPC auth |
 | **Abilities allowlist** | Only `core/get-site-info`, `my-plugin/*` | `wp_ability_permission_result` |
-| **Abilities-only** | REST access limited to `/wp-abilities/v1` | `rest_pre_dispatch` |
+| **Abilities-only** | REST access limited to `/wp-abilities/v1` | REST dispatch filters |
 | **Block XML-RPC** | Refused on XML-RPC; REST, GraphQL and other endpoints still work | `wp_authenticate_application_password_errors` |
 | **Expiry** | Stops working after 7 days | `wp_authenticate_application_password_errors` |
 | **Granter cap** *(automatic)* | A password an admin creates for someone else can't exceed what the admin can do | `map_meta_cap` |
@@ -81,8 +81,9 @@ The Abilities API does not replace capability scoping. Ability `permission_callb
 
 1. `application_password_did_authenticate` records which password authenticated and loads its scope.
 2. A `map_meta_cap` filter at `PHP_INT_MAX` checks every primitive capability the authenticated user needs against the scope. If any is out of scope, the result is `do_not_allow`. This covers REST, XML-RPC, abilities, and any plugin code calling `current_user_can()`.
-3. Request-level rules (read-only, abilities-only) run in `rest_pre_dispatch`, which also runs per sub-request inside `/batch/v1`.
-4. Scopes are stored in user meta (`_application_password_scopes`), keyed by password UUID, and removed when the password is deleted.
+3. Request-level rules (read-only, abilities-only) are checked three times on REST: first in `rest_pre_dispatch`, again just before the route's callback, and on the response. A plugin that answers a route itself can't get an out-of-scope response past them. They also run per sub-request inside `/batch/v1`.
+4. Off REST, the same rules are applied when the password authenticates. XML-RPC authenticates inside each method call, so read-only can be judged by method name there.
+5. Scopes are stored in user meta (`_application_password_scopes`), keyed by password UUID, and removed when the password is deleted. Every save from REST, a form or an access approval goes through one function, which sets the granter server-side.
 
 ### Escalation hardening
 
@@ -91,10 +92,10 @@ A scoped password could otherwise free itself. Any password with *any* restricti
 - `create_app_password`, `edit_app_password`, and `delete_app_password(s)`, so it can't mint an unscoped sibling or rewrite its own scope.
 - `edit_user`, `delete_user`, `promote_user`, and `remove_user` on **its own account**, and on **any account that can do more than the scope allows**. Otherwise it could change that account's email or password, then log in with a full cookie session.
 - Assigning a role it couldn't exercise itself, when creating or promoting a user. That covers the site's default role too: a user created without one gets no role if the default is out of scope.
-- On multisite, a password with a role limit or denied groups is removed from `site_admins` for that request, because `is_super_admin()` skips `map_meta_cap`. That's all-or-nothing: denying even one group drops *all* network powers, and the password keeps only the user's role on the site. The technique is borrowed from [t3admin](https://github.com/georgestephanis/t3admin). `tests/multisite.sh` covers it.
-- Over XML-RPC, which has no read/write metadata, a password with request-level restrictions fails authentication instead of being silently under-enforced.
+- On multisite, a password with a role limit or denied groups loses super-admin status for that request, because `is_super_admin()` skips `map_meta_cap`. Both sources of super admins are covered: the `site_admins` option and a `$super_admins` global declared in `wp-config.php`. That's all-or-nothing: denying even one group drops *all* network powers, and the password keeps only the user's role on the site. The technique is borrowed from [t3admin](https://github.com/georgestephanis/t3admin). `tests/multisite.sh` covers it.
+- Off REST, restrictions that can't be enforced fail authentication instead of being silently ignored. Ability restrictions always do. Read-only does unless the request is known to read: XML-RPC `get*` and `supported*` methods (but not `system.multicall`), or anything a plugin declares read-only. Any password can also **Block XML-RPC** outright.
 
-A password can always `GET …/application-passwords/introspect`, so the client can discover what it was actually granted.
+A restricted password can always do two things: `GET …/application-passwords/introspect` to see what it was granted, and file an access request to ask for more. Neither changes what it may do.
 
 ### Deactivating the plugin suspends scoped passwords
 
@@ -106,7 +107,7 @@ A password someone created for another user stays capped at what that person can
 
 ## Interfaces
 
-**Authorize Application flow.** An app can *request* a scope in the authorize URL. The person approving sees it pre-filled and can change it before approving:
+**Authorize Application flow.** An app can *request* a scope in the authorize URL. The person approving sees it pre-filled and can narrow it, but not broaden it (see [Asking for more access](#asking-for-more-access)):
 
 ```text
 /wp-admin/authorize-application.php?app_name=My+Agent
@@ -145,18 +146,18 @@ wp application-password scope groups
 
 ## What core would need
 
-Almost everything was possible with existing hooks, which is a credit to the 5.6 extension points. Each gap is tracked as a sub-issue of [#1](https://github.com/georgestephanis/application-passwords-scoped/issues/1):
+Almost everything was possible with existing hooks, which is a credit to the 5.6 extension points. [docs/core-gaps.md](docs/core-gaps.md) compares each gap's plugin workaround with a core change; only #13 truly needs core. Each gap is tracked as a sub-issue of [#1](https://github.com/georgestephanis/application-passwords-scoped/issues/1):
 
 - [#3](https://github.com/georgestephanis/application-passwords-scoped/issues/3) Store metadata on the Application Password item
 - [#4](https://github.com/georgestephanis/application-passwords-scoped/issues/4) Expose the authenticated Application Password outside REST
 - [#5](https://github.com/georgestephanis/application-passwords-scoped/issues/5) `is_super_admin()` needs a filter
 - [#6](https://github.com/georgestephanis/application-passwords-scoped/issues/6) Read-only scopes need route-level `readonly` annotations
 - [#7](https://github.com/georgestephanis/application-passwords-scoped/issues/7) Standard authorize-flow protocol for requesting and reporting scopes
-- [#13](https://github.com/georgestephanis/application-passwords-scoped/issues/13) Deactivating the plugin silently removes every restriction
+- [#13](https://github.com/georgestephanis/application-passwords-scoped/issues/13) Enforcement when the plugin isn't running (deactivation is handled; fatals and missing files aren't)
 
 ## Design decisions
 
-Settled, and implemented as described above:
+Settled, and implemented as described above. [docs/design-decisions.md](docs/design-decisions.md) explains the reasoning behind each, plus lessons from building it:
 
 - [#8](https://github.com/georgestephanis/application-passwords-scoped/issues/8) Approvers can only narrow what an app requested. Apps ask for more with an access request.
 - [#9](https://github.com/georgestephanis/application-passwords-scoped/issues/9) Scopes are editable after creation.
@@ -176,6 +177,7 @@ composer install && npm ci --ignore-scripts
 composer lint:php     # WordPress Coding Standards + PHP 7.4 compatibility
 npm run lint          # @wordpress/scripts: JS, CSS, package.json, docs
 tests/smoke.sh        # end-to-end tests against WordPress Playground
+tests/multisite.sh    # the same, for multisite and super admins
 ```
 
 Requires WordPress 6.9+ (Abilities API) and PHP 7.4+. See [AGENTS.md](AGENTS.md) for setup, local testing, architecture, and the invariants any change must keep. The Playground link above sets up example scoped passwords and opens the authorize screen with a pre-filled scope request.

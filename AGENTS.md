@@ -37,12 +37,15 @@ includes/
 ├── class-lifecycle.php            Suspends scoped passwords on deactivation, restores on activation.
 ├── class-access-requests.php      Apps asking for a broader scope; owner approves/denies (#8).
 └── class-cli.php                  `wp application-password scope get|set|clear|groups`.
-assets/admin.js                    Adds `scope` to core's JS REST requests via wp.hooks filters.
+assets/admin.js                    Adds `scope` to core's create-password requests (wp.hooks
+                                   filters) and saves the inline "Edit access" forms (apiFetch PUT).
 assets/admin.css
 tests/smoke.sh                     End-to-end test against WordPress Playground (see Testing).
 tests/multisite.sh                 Multisite/super-admin test, on its own Playground network.
-docs/plugin-authors.md             How plugin capabilities, roles, routes and abilities meet scopes.
-tests/playground/                  Test-only blueprint + mu-plugin fixture. Never shipped.
+tests/playground/                  Test-only blueprints + mu-plugin fixture. Never shipped.
+docs/plugin-authors.md             For plugin authors: capabilities, roles, routes, abilities, hooks.
+docs/core-gaps.md                  Each core gap: plugin workaround vs. core change.
+docs/design-decisions.md           Why things are the way they are, and lessons learned.
 .github/blueprint.json             Public "Open in Playground" demo.
 .github/setup.php                  Demo data for that blueprint (example scoped passwords, roles).
 .github/screenshots/               README images.
@@ -63,13 +66,14 @@ Everything hangs off hooks core already ships. Don't patch or replace core behav
 | `map_meta_cap` @ `PHP_INT_MAX` | Enforcer | Return `do_not_allow` if any required primitive cap is out of scope. The backbone. |
 | `editable_roles` | Enforcer | Hide roles the scope couldn't exercise, so a scoped password can't create or promote users into them. |
 | `rest_pre_insert_user` | Enforcer | A user created without `roles` gets no role if `default_role` is out of scope. |
-| `site_option_site_admins` | Enforcer | Drop a cap-limited user from super admins for the request (`is_super_admin()` skips `map_meta_cap`). |
+| `site_option_site_admins` | Enforcer | Drop a cap-limited user from super admins for the request (`is_super_admin()` skips `map_meta_cap`). `activate()` also narrows a `$super_admins` global from wp-config.php, which `get_super_admins()` prefers. |
 | `rest_pre_dispatch` @ `PHP_INT_MIN` | Enforcer | Read-only (HTTP method) and abilities-only (route) gates, before any plugin can short-circuit. Also runs per `/batch/v1` sub-request. |
 | `rest_request_before_callbacks` @ `PHP_INT_MAX` | Enforcer | The same gates again, immediately before the route's permission callback and handler. |
 | `rest_post_dispatch` @ `PHP_INT_MAX` | Enforcer | The same gates on the way out, so an out-of-scope response is never returned, even if a plugin overrode the error. |
 | `delete_user`, `wpmu_delete_user`, `set_user_role`, `remove_user_role` | Enforcer | Offer the granter's passwords to `application_password_scope_revoke_granted` (#12). |
 | `wp_ability_permission_result` | Enforcer | Ability allowlist; read-only passwords only run `readonly`-annotated abilities. |
-| `wp_create_application_password` | Enforcer, Admin | Record `granted_by` when one user creates a password for another; no-JS authorize form. |
+| `wp_create_application_password` | Enforcer, Admin | Apply the default scope (`application_password_scope_default`) and record `granted_by` when one user creates a password for another; no-JS authorize form. |
+| `rest_api_init`, `admin_notices`, `admin_post_*` | Access_Requests | Access-request endpoints, owner notice, approve/deny handler. |
 | `wp_delete_application_password` | Enforcer | Delete the scope with its password. |
 | `after_plugin_row_<plugin>` | Admin | Warn that deactivating suspends scoped passwords (#13). |
 | `delete_user_form` | Admin | List passwords the deleted user granted, which will stop working (#12). |
@@ -109,7 +113,13 @@ granter and relies on that.
 - `Admin::normalize_form()` (no-JS path) and `readRoles()` in `assets/admin.js` (REST path)
   implement the same mapping from form controls to `roles`. Change them together.
 - The admin form must never offer a choice that enforcement would silently undo. Roles the owner
-  or granter can't use are shown **disabled**, not hidden. That way the person approving sees why.
+  or granter can't use are shown **disabled**, not hidden, so the person sees why. The one
+  exception is narrowing-only on the authorize screen: options broader than the app's request are
+  hidden, because offering them would invite granting more than was asked. The no-JS path enforces
+  the same limit with `Scope::constrain_to()`.
+- The inline "Edit access" forms sit inside the profile `<form>`, so their inputs carry
+  `data-name`, not `name`. Otherwise they'd be submitted with the profile and trip core's
+  unsaved-changes prompt. In `admin.js`, always look fields up with `field()`, which matches both.
 
 ## Development setup
 
@@ -126,6 +136,7 @@ composer format:php           # PHPCBF auto-fix
 npm run lint                  # lint:js, lint:style, lint:pkg-json, lint:md:docs
 npm run format                # Prettier (wp-prettier) on assets/
 npm run test:smoke            # tests/smoke.sh
+npm run test:multisite        # tests/multisite.sh
 ```
 
 CI (`.github/workflows/lint.yml`) runs `composer lint:php` and `npm run lint` on every push to
@@ -138,8 +149,8 @@ CI (`.github/workflows/lint.yml`) runs `composer lint:php` and `npm run lint` on
   release at least two weeks old, then run `npm run format` and `npm run lint`, since its
   Prettier and stylelint rules change between majors. `assets/admin.js` declares
   `/* global jQuery */`: it runs in wp-admin with core's jQuery and `wp.hooks`, and isn't bundled.
-- **Docs:** `npm run lint:md:docs` lints `README.md` and `AGENTS.md`. Give fenced code blocks a
-  language, and use `| a | b |` table spacing.
+- **Docs:** `npm run lint:md:docs` lints `README.md`, `AGENTS.md` and `docs/`. Give fenced code
+  blocks a language, and use `| a | b |` table spacing.
 
 ## Testing
 
@@ -210,7 +221,10 @@ installs the plugin from GitHub, so it tests `trunk`, not your working tree.
   appear `true` there and still fail `user_can()`, e.g. `unfiltered_html` under
   `DISALLOW_UNFILTERED_HTML`. Use the fixture's `/aps-test/v1/can/` route to check what is really
   allowed.
-- Kill stale servers before restarting: `lsof -ti :9400 | xargs kill`.
+- **In ad-hoc curl against the UI blueprint, send `-b playground_auto_login_already_happened=1`.**
+  That blueprint has a `login` step, so cookieless requests get redirected.
+- Kill stale servers before restarting: `lsof -ti tcp:9400 | xargs kill`. One port per `-i`;
+  `-i :9400,:9401` is an error.
 
 ## Conventions
 
@@ -233,6 +247,9 @@ installs the plugin from GitHub, so it tests `trunk`, not your working tree.
   Run `tests/multisite.sh` too for anything touching capabilities, roles or super admins.
 - If you change the admin UI, check it in a browser (see Manual testing). Update the README
   screenshot in `.github/screenshots/` if it's now out of date.
-- Record design decisions and newly found core gaps as issues, not in the README. The README links
-  out to them. Sub-issues group related items under a parent ("What core would need",
-  "Open questions").
+- Discuss design questions and core gaps as **issues**; sub-issues group them under #1 ("What core
+  would need") and #2 ("Open design questions"). Once one is settled, record the *outcome and its
+  reasoning* in `docs/design-decisions.md`, or `docs/core-gaps.md` for core gaps, and link the
+  issue. The README links out rather than repeating them.
+- When something costs real debugging time, add it to "Lessons" in `docs/design-decisions.md` or
+  to the Playground gotchas above, so the next person doesn't pay for it again.

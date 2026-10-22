@@ -72,6 +72,16 @@ expect_can noplugins manage_network         false
 expect_can noplugins manage_options         true
 expect_can noplugins activate_plugins       false
 
+# is_super_admin() itself, which core calls directly in places that skip map_meta_cap: from the
+# site_admins option, and from a `$super_admins` global as wp-config.php can declare.
+sa() { "${CURL[@]}" -u "admin:$(pw "$1")" "$URL/wp-json/aps-test/v1/can/read$2" | grep -o '"super_admin":[a-z]*' | cut -d: -f2; }
+for c in "full - true" "author - false" "readonly - true" "full ?aps_global_sa=1 true" "author ?aps_global_sa=1 false" "noplugins ?aps_global_sa=1 false"; do
+	set -- $c
+	q="$2"; [ "$q" = "-" ] && q=""
+	got="$(sa "$1" "$q")"
+	if [ "$got" = "$3" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL is_super_admin $1 ${q:-option} expected $3, got $got"; fi
+done
+
 # Request-level scopes don't limit capabilities, so super admin stays intact.
 expect_can readonly  manage_network         true
 

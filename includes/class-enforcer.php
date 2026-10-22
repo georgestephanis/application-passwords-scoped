@@ -104,6 +104,12 @@ class Enforcer {
 		if ( $scope instanceof Scope && $scope->is_restricted() ) {
 			self::$scope   = $scope;
 			self::$user_id = (int) $user->ID;
+
+			// get_super_admins() prefers a `$super_admins` global (set in wp-config.php) over the
+			// site_admins option, so filtering the option alone misses those sites.
+			if ( $scope->limits_caps() && isset( $GLOBALS['super_admins'] ) && is_array( $GLOBALS['super_admins'] ) ) {
+				$GLOBALS['super_admins'] = array_values( array_diff( $GLOBALS['super_admins'], array( $user->user_login ) ) ); // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Narrowing super admins for this request only.
+			}
 		}
 	}
 

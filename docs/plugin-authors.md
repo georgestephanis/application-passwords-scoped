@@ -131,11 +131,11 @@ only if the request truly can't change anything: read-only passwords trust your 
 | `application_password_scope_default` | Set the scope new passwords start with (default: full access). |
 | `application_password_scope` | Adjust the scope applied to an authenticated request. |
 | `application_password_scope_revoke_granted` | Revoke passwords someone created for others when they're deleted or demoted. |
-| `application_password_scope_saved` (action) | React to a scope being created or edited. |
+| `application_password_scope_saved` (action) | React to a scope being saved from REST, a form or an approved access request. |
 | `application_password_scope_access_requested` (action) | Notify the owner another way when an app asks for more access. |
 | `application_password_scope_access_decided` (action) | React to an access request being approved or denied. |
 
 ## Questions or gaps
 
-Open an issue, or comment on
-[#15](https://github.com/georgestephanis/application-passwords-scoped/issues/15).
+[Open an issue](https://github.com/georgestephanis/application-passwords-scoped/issues/new). For why
+things work the way they do, see [design-decisions.md](design-decisions.md).

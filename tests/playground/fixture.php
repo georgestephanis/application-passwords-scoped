@@ -35,12 +35,20 @@ add_action(
 				'methods'             => 'GET',
 				'permission_callback' => '__return_true',
 				'callback'            => static function ( $request ) {
-					return array( 'can' => current_user_can( $request['cap'] ) );
+					return array(
+						'can'         => current_user_can( $request['cap'] ),
+						'super_admin' => is_super_admin(),
+					);
 				},
 			)
 		);
 	}
 );
+
+// ?aps_global_sa=1: declare super admins with the `$super_admins` global, as wp-config.php can (#5).
+if ( isset( $_GET['aps_global_sa'] ) ) {
+	$GLOBALS['super_admins'] = array( 'admin' ); // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Test fixture.
+}
 
 // A plugin-registered capability group with a wildcard (#10).
 add_action(
