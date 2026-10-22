@@ -1,0 +1,23 @@
+{
+    "$schema": "https://playground.wordpress.net/blueprint-schema.json",
+    "preferredVersions": {
+        "php": "8.3",
+        "wp": "latest"
+    },
+    "steps": [
+        {
+            "step": "activatePlugin",
+            "pluginPath": "application-passwords-scoped/application-passwords-scoped.php"
+        },
+        {
+            "step": "setSiteOptions",
+            "options": {
+                "permalink_structure": "/%postname%/"
+            }
+        },
+        {
+            "step": "runPHP",
+            "code": "<?php require '/wordpress/wp-load.php'; include WP_PLUGIN_DIR . '/application-passwords-scoped/.github/setup.php';"
+        }
+    ]
+}

@@ -62,7 +62,7 @@ class Admin {
 	 * Fields on the Authorize Application screen.
 	 *
 	 * An app can *request* a scope by adding it to the authorize URL, e.g.
-	 * `authorize-application.php?app_name=Foo&scope[role]=author&scope[deny]=plugins,users&scope[expires_in]=86400`.
+	 * `authorize-application.php?app_name=Foo&scope[roles][]=author&scope[deny]=plugins,users&scope[expires_in]=86400`.
 	 * It's shown pre-filled; the person approving can tighten or loosen it before approving.
 	 *
 	 * @param array    $request Authorize request data.
@@ -95,8 +95,29 @@ class Admin {
 	 */
 	private static function render_fields( Scope $scope, $user, $open ) {
 		$field     = self::FIELD;
-		$roles     = array_reverse( wp_roles()->get_names(), true );
+		$names     = wp_roles()->get_names();
+		$ladder    = Scope::hierarchical_roles();
+		$own_core  = array_values( array_intersect( $ladder, (array) $user->roles ) );
+		$acting    = wp_get_current_user();
+		$for_other = $acting->ID !== $user->ID;
+
+		// The highest selectable rung is the lower of the owner's and (when scoping someone
+		// else's password) the acting user's. Anything above it is shown but disabled.
+		$own_rank  = max( self::ladder_rank( $user, $ladder ), $for_other ? self::ladder_rank( $acting, $ladder ) : 0 );
+		$extras    = array_values( array_diff( (array) $user->roles, $ladder ) );
 		$abilities = function_exists( 'wp_get_abilities' ) ? wp_get_abilities() : array();
+
+		// Map a stored/requested roles list back onto the two controls.
+		$base_role = '';
+		if ( null !== $scope->roles ) {
+			$requested_core = array_values( array_intersect( $ladder, $scope->roles ) );
+			$base_role      = $requested_core ? $requested_core[0] : '__none__';
+
+			// A request for a role above the user's own is the same as no limit.
+			if ( $requested_core && array_search( $base_role, $ladder, true ) < $own_rank ) {
+				$base_role = '';
+			}
+		}
 
 		// Snap a requested expiry to the closest preset at or below it, so the prefill never extends it.
 		$expires_in = 0;
@@ -108,11 +129,21 @@ class Admin {
 			}
 		}
 		?>
-		<details class="app-password-scope" <?php echo $open || $scope->is_restricted() ? 'open' : ''; ?>>
+		<details class="app-password-scope" data-own-roles="<?php echo esc_attr( wp_json_encode( $own_core ) ); ?>" <?php echo $open || $scope->is_restricted() ? 'open' : ''; ?>>
 			<summary><?php esc_html_e( 'Limit what this password can do', 'application-passwords-scoped' ); ?></summary>
 
 			<p class="description">
-				<?php esc_html_e( 'Restrictions only ever remove access. The password can never do more than your own account can.', 'application-passwords-scoped' ); ?>
+				<?php if ( $for_other ) : ?>
+					<?php
+					printf(
+						/* translators: %s: display name of the user the password belongs to. */
+						esc_html__( 'Restrictions only ever remove access. Because you are creating this for %s, it can never do more than either of you can.', 'application-passwords-scoped' ),
+						esc_html( $user->display_name )
+					);
+					?>
+				<?php else : ?>
+					<?php esc_html_e( 'Restrictions only ever remove access. The password can never do more than your own account can.', 'application-passwords-scoped' ); ?>
+				<?php endif; ?>
 			</p>
 
 			<fieldset>
@@ -121,15 +152,53 @@ class Admin {
 					<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[read_only]" value="1" <?php checked( $scope->read_only ); ?> />
 					<?php esc_html_e( 'Read-only — can view but not change anything', 'application-passwords-scoped' ); ?>
 				</label>
-				<label class="app-password-scope-role">
-					<?php esc_html_e( 'Act with at most the permissions of:', 'application-passwords-scoped' ); ?>
-					<select name="<?php echo esc_attr( $field ); ?>[role]">
-						<option value=""><?php esc_html_e( '— My own role (no limit) —', 'application-passwords-scoped' ); ?></option>
-						<?php foreach ( $roles as $slug => $name ) : ?>
-							<option value="<?php echo esc_attr( $slug ); ?>" <?php selected( $scope->role, $slug ); ?>><?php echo esc_html( translate_user_role( $name ) ); ?></option>
-						<?php endforeach; ?>
-					</select>
+			</fieldset>
+
+			<fieldset class="app-password-scope-roles">
+				<legend><?php esc_html_e( 'Act with at most the permissions of:', 'application-passwords-scoped' ); ?></legend>
+				<label>
+					<input type="radio" name="<?php echo esc_attr( $field ); ?>[base_role]" value="" <?php checked( $base_role, '' ); ?> />
+					<?php
+					if ( $for_other ) {
+						/* translators: %s: display name of the user the password belongs to. */
+						printf( esc_html__( "%s's own roles, capped at yours", 'application-passwords-scoped' ), esc_html( $user->display_name ) );
+					} else {
+						esc_html_e( 'My own role (no limit)', 'application-passwords-scoped' );
+					}
+					?>
 				</label>
+				<?php foreach ( $ladder as $rank => $slug ) : ?>
+					<?php $above_own = $rank < $own_rank || ( $for_other && ! self::can_grant_role( $acting, $user, $slug ) ); ?>
+					<label class="<?php echo $above_own ? 'is-disabled' : ''; ?>">
+						<input type="radio" name="<?php echo esc_attr( $field ); ?>[base_role]" value="<?php echo esc_attr( $slug ); ?>" <?php checked( $base_role, $slug ); ?> <?php disabled( $above_own ); ?> />
+						<?php echo esc_html( translate_user_role( $names[ $slug ] ) ); ?>
+						<?php if ( $above_own ) : ?>
+							<span class="description"><?php echo $for_other ? esc_html__( '(not available to both of you)', 'application-passwords-scoped' ) : esc_html__( '(above your own role)', 'application-passwords-scoped' ); ?></span>
+						<?php endif; ?>
+					</label>
+				<?php endforeach; ?>
+				<label>
+					<input type="radio" name="<?php echo esc_attr( $field ); ?>[base_role]" value="__none__" <?php checked( $base_role, '__none__' ); ?> />
+					<?php esc_html_e( 'None of these', 'application-passwords-scoped' ); ?>
+				</label>
+				<?php if ( $extras ) : ?>
+					<div class="app-password-scope-extra-roles">
+						<p><?php esc_html_e( 'Also keep these roles:', 'application-passwords-scoped' ); ?></p>
+						<?php foreach ( $extras as $slug ) : ?>
+							<?php $grantable = ! $for_other || self::can_grant_role( $acting, $user, $slug ); ?>
+							<label class="<?php echo $grantable ? '' : 'is-disabled'; ?>">
+								<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[keep_roles][]" value="<?php echo esc_attr( $slug ); ?>" <?php checked( $grantable && ( null === $scope->roles || in_array( $slug, $scope->roles, true ) ) ); ?> <?php disabled( ! $grantable ); ?> />
+								<?php echo esc_html( translate_user_role( $names[ $slug ] ?? $slug ) ); ?>
+								<?php if ( ! $grantable ) : ?>
+									<span class="description"><?php esc_html_e( '(you don\'t have this role\'s permissions, so you can\'t grant it)', 'application-passwords-scoped' ); ?></span>
+								<?php endif; ?>
+							</label>
+						<?php endforeach; ?>
+					</div>
+				<?php endif; ?>
+			</fieldset>
+
+			<fieldset>
 				<label class="app-password-scope-expires">
 					<?php esc_html_e( 'Stop working after:', 'application-passwords-scoped' ); ?>
 					<select name="<?php echo esc_attr( $field ); ?>[expires_in]">
@@ -180,6 +249,57 @@ class Admin {
 	}
 
 	/**
+	 * Position of a user's highest core role on the ladder (0 = top). Super admins rank above all.
+	 *
+	 * @param \WP_User $user   User.
+	 * @param string[] $ladder Hierarchical role slugs, highest first.
+	 * @return int
+	 */
+	private static function ladder_rank( $user, array $ladder ) {
+		if ( is_multisite() && is_super_admin( $user->ID ) ) {
+			return 0;
+		}
+
+		foreach ( $ladder as $rank => $slug ) {
+			if ( in_array( $slug, (array) $user->roles, true ) ) {
+				return $rank;
+			}
+		}
+
+		return count( $ladder );
+	}
+
+	/**
+	 * Whether a granter could hand a role's powers to the owner: every capability of the role that
+	 * the owner can actually exercise, the granter must be able to exercise too. Mirrors the runtime
+	 * rule (Scope::allows_cap() intersects with the granter), so the UI never offers a choice the
+	 * enforcement would silently undo.
+	 *
+	 * Capabilities neither user can use (e.g. `unfiltered_html` under DISALLOW_UNFILTERED_HTML)
+	 * are ignored, otherwise no role containing one could ever be granted.
+	 *
+	 * @param \WP_User $granter User creating/scoping the password.
+	 * @param \WP_User $owner   User the password belongs to.
+	 * @param string   $slug    Role slug.
+	 * @return bool
+	 */
+	private static function can_grant_role( $granter, $owner, $slug ) {
+		$role = get_role( $slug );
+
+		if ( ! $role ) {
+			return false;
+		}
+
+		foreach ( array_keys( array_filter( $role->capabilities ) ) as $cap ) {
+			if ( user_can( $owner, $cap ) && ! user_can( $granter, $cap ) ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
 	 * Expiry presets, in seconds from now.
 	 *
 	 * @return array<int, string>
@@ -215,19 +335,44 @@ class Admin {
 		}
 
 		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Scope::from_array() allowlists every field.
-		Scope_Store::set( $user_id, $item['uuid'], Scope::from_array( self::normalize_form( wp_unslash( $_POST[ self::FIELD ] ) ) ) );
+		$data               = self::normalize_form( wp_unslash( $_POST[ self::FIELD ] ), get_userdata( $user_id ) );
+		$data['granted_by'] = get_current_user_id() === $user_id ? 0 : get_current_user_id();
+		Scope_Store::set( $user_id, $item['uuid'], Scope::from_array( $data ) );
 		// phpcs:enable
 	}
 
 	/**
-	 * The form uses a `restrict_abilities` toggle to distinguish "no ability restriction" (null)
-	 * from "no abilities allowed" (empty list).
+	 * Translate form fields into Scope input.
 	 *
-	 * @param array $data Raw form data.
+	 * - `base_role` (the ladder dropdown) plus `keep_roles` (toggles for the user's other roles)
+	 *   become `roles`. Leaving the dropdown alone with every toggle on means no role limit.
+	 * - A `restrict_abilities` toggle distinguishes "no ability restriction" (null) from
+	 *   "no abilities allowed" (empty list).
+	 *
+	 * assets/admin.js mirrors this for the JS/REST path; keep the two in step.
+	 *
+	 * @param array    $data Raw form data.
+	 * @param \WP_User $user User the password is for.
 	 * @return array
 	 */
-	private static function normalize_form( $data ) {
-		$data = (array) $data;
+	private static function normalize_form( $data, $user ) {
+		$data   = (array) $data;
+		$ladder = Scope::hierarchical_roles();
+		$extras = array_values( array_diff( (array) $user->roles, $ladder ) );
+		$base   = isset( $data['base_role'] ) ? (string) $data['base_role'] : '';
+		$kept   = array_values( array_intersect( $extras, (array) ( $data['keep_roles'] ?? array() ) ) );
+
+		if ( '' === $base && count( $kept ) === count( $extras ) ) {
+			$data['roles'] = null;
+		} else {
+			if ( '' === $base ) {
+				$base_roles = array_values( array_intersect( $ladder, (array) $user->roles ) );
+			} else {
+				$base_roles = '__none__' === $base ? array() : array( $base );
+			}
+			$data['roles'] = array_merge( $base_roles, $kept );
+		}
+		unset( $data['role'] );
 
 		if ( empty( $data['restrict_abilities'] ) ) {
 			$data['abilities'] = null;

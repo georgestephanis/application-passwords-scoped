@@ -73,6 +73,7 @@ class Enforcer {
 		add_filter( 'rest_pre_dispatch', array( __CLASS__, 'rest_pre_dispatch' ), 10, 3 );
 		add_filter( 'wp_ability_permission_result', array( __CLASS__, 'ability_permission' ), 10, 4 );
 		add_action( 'wp_delete_application_password', array( __CLASS__, 'cleanup' ), 10, 2 );
+		add_action( 'wp_create_application_password', array( __CLASS__, 'record_granter' ), 10, 2 );
 	}
 
 	/**
@@ -259,6 +260,27 @@ class Enforcer {
 		}
 
 		return $result;
+	}
+
+	/**
+	 * When one user creates a password for another, cap it at what the creator can do — even if
+	 * the request set no scope at all. Without this, an admin with `edit_users` but no
+	 * `install_plugins` (say, on multisite) could mint a plugin-installing password for a
+	 * super admin. A scope sent in the same REST request is saved after this and keeps the granter.
+	 *
+	 * @param int   $user_id User the password belongs to.
+	 * @param array $item    New item.
+	 */
+	public static function record_granter( $user_id, $item ) {
+		$acting = get_current_user_id();
+
+		if ( ! $acting || $acting === (int) $user_id ) {
+			return;
+		}
+
+		$scope             = Scope_Store::get( $user_id, $item['uuid'] );
+		$scope->granted_by = $acting;
+		Scope_Store::set( $user_id, $item['uuid'], $scope );
 	}
 
 	/**

@@ -49,10 +49,13 @@ class REST {
 			'type'        => 'object',
 			'context'     => array( 'view', 'edit', 'embed' ),
 			'properties'  => array(
-				'role'           => array(
-					'description' => __( 'Role slug used as a capability ceiling.', 'application-passwords-scoped' ),
-					'type'        => 'string',
-					'enum'        => array_merge( array( '' ), array_keys( wp_roles()->get_names() ) ),
+				'roles'          => array(
+					'description' => __( 'Roles whose capabilities this password may use. null for no role restriction; an empty list allows no role capabilities.', 'application-passwords-scoped' ),
+					'type'        => array( 'array', 'null' ),
+					'items'       => array(
+						'type' => 'string',
+						'enum' => array_keys( wp_roles()->get_names() ),
+					),
 				),
 				'deny'           => array(
 					'description' => __( 'Capability groups withheld from this password.', 'application-passwords-scoped' ),
@@ -84,6 +87,11 @@ class REST {
 					'description' => __( 'Write-only convenience: seconds from now until the password expires. Takes precedence over expires.', 'application-passwords-scoped' ),
 					'type'        => 'integer',
 					'minimum'     => 0,
+				),
+				'granted_by'     => array(
+					'description' => __( 'User who set this scope on another user\'s behalf. Set automatically; capabilities must also pass for this user.', 'application-passwords-scoped' ),
+					'type'        => 'integer',
+					'readonly'    => true,
 				),
 				'summary'        => array(
 					'description' => __( 'Human readable summary.', 'application-passwords-scoped' ),
@@ -118,7 +126,13 @@ class REST {
 	 * @return true
 	 */
 	public static function update_scope( $value, $item, $field, $request ) {
-		Scope_Store::set( self::user_id( $request ), $item['uuid'], Scope::from_array( $value ) );
+		$user_id = self::user_id( $request );
+		$value   = is_array( $value ) ? $value : array();
+
+		// Never trust a submitted granter: record whoever is acting, unless it's the owner.
+		$value['granted_by'] = get_current_user_id() === $user_id ? 0 : get_current_user_id();
+
+		Scope_Store::set( $user_id, $item['uuid'], Scope::from_array( $value ) );
 
 		return true;
 	}

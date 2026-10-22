@@ -15,13 +15,17 @@ namespace Application_Passwords_Scoped;
 final class Scope {
 
 	/**
-	 * Role slug acting as a capability ceiling, or '' for none.
+	 * Roles whose capabilities this password may use, or null for no role restriction.
 	 *
-	 * The password can only use capabilities that BOTH the user has AND this role grants.
+	 * The password can only use capabilities that BOTH the user has AND at least one of these
+	 * roles grants. It's a list rather than a single ceiling because roles don't all sit on one
+	 * ladder: core's Administrator > Editor > Author > Contributor > Subscriber do, but plugin
+	 * roles like bbPress's Keymaster or Yoast's SEO Manager are held *alongside* them and need
+	 * to be kept or dropped independently. An empty list allows no role capabilities at all.
 	 *
-	 * @var string
+	 * @var string[]|null
 	 */
-	public $role = '';
+	public $roles = null;
 
 	/**
 	 * Capability group slugs (see Capability_Groups) that are withheld entirely.
@@ -55,6 +59,17 @@ final class Scope {
 	public $abilities_only = false;
 
 	/**
+	 * ID of the user who created or last scoped this password on someone else's behalf, or 0.
+	 *
+	 * When set, every capability must ALSO pass for this user, so nobody can mint a credential for
+	 * another account that's stronger than their own. Always set server-side from the acting user,
+	 * never from request input. If the granter is later deleted, the password fails closed.
+	 *
+	 * @var int
+	 */
+	public $granted_by = 0;
+
+	/**
 	 * Unix timestamp after which the password stops authenticating, or 0 for never.
 	 *
 	 * @var int
@@ -74,8 +89,17 @@ final class Scope {
 			return $scope;
 		}
 
-		if ( ! empty( $data['role'] ) && is_string( $data['role'] ) && wp_roles()->is_role( $data['role'] ) ) {
-			$scope->role = $data['role'];
+		// `role` (a single slug) is accepted as shorthand for `roles`.
+		if ( ! isset( $data['roles'] ) && ! empty( $data['role'] ) && is_string( $data['role'] ) ) {
+			$data['roles'] = array( $data['role'] );
+		}
+
+		if ( isset( $data['roles'] ) && null !== $data['roles'] ) {
+			$roles = is_string( $data['roles'] ) ? explode( ',', $data['roles'] ) : (array) $data['roles'];
+
+			// Unknown roles are dropped, not ignored: asking for only a role that doesn't exist
+			// yields no role capabilities, failing closed.
+			$scope->roles = array_values( array_unique( array_filter( array_map( 'trim', $roles ), array( wp_roles(), 'is_role' ) ) ) );
 		}
 
 		if ( ! empty( $data['deny'] ) ) {
@@ -86,6 +110,8 @@ final class Scope {
 
 		$scope->read_only      = ! empty( $data['read_only'] ) && 'false' !== $data['read_only'];
 		$scope->abilities_only = ! empty( $data['abilities_only'] ) && 'false' !== $data['abilities_only'];
+
+		$scope->granted_by = isset( $data['granted_by'] ) ? absint( $data['granted_by'] ) : 0;
 
 		if ( ! empty( $data['expires_in'] ) && (int) $data['expires_in'] > 0 ) {
 			$scope->expires = time() + (int) $data['expires_in'];
@@ -109,18 +135,39 @@ final class Scope {
 	}
 
 	/**
+	 * Core's nested roles, highest first. Each is a superset of the next, so the UI offers them
+	 * as a single "at most" choice; every other role is offered as an independent toggle.
+	 *
+	 * @return string[] Role slugs that exist on this site.
+	 */
+	public static function hierarchical_roles() {
+		/**
+		 * Filters the roles treated as one nested ladder rather than independent toggles.
+		 *
+		 * @param string[] $roles Role slugs, highest first.
+		 */
+		$roles = apply_filters(
+			'application_password_scope_hierarchical_roles',
+			array( 'administrator', 'editor', 'author', 'contributor', 'subscriber' )
+		);
+
+		return array_values( array_filter( $roles, array( wp_roles(), 'is_role' ) ) );
+	}
+
+	/**
 	 * Serialize for storage / REST output.
 	 *
 	 * @return array
 	 */
 	public function to_array() {
 		return array(
-			'role'           => $this->role,
+			'roles'          => $this->roles,
 			'deny'           => $this->deny,
 			'read_only'      => $this->read_only,
 			'abilities'      => $this->abilities,
 			'abilities_only' => $this->abilities_only,
 			'expires'        => $this->expires,
+			'granted_by'     => $this->granted_by,
 		);
 	}
 
@@ -130,12 +177,13 @@ final class Scope {
 	 * @return bool
 	 */
 	public function is_restricted() {
-		return '' !== $this->role
+		return null !== $this->roles
 			|| array() !== $this->deny
 			|| $this->read_only
 			|| null !== $this->abilities
 			|| $this->abilities_only
-			|| $this->expires > 0;
+			|| $this->expires > 0
+			|| $this->granted_by > 0;
 	}
 
 	/**
@@ -153,7 +201,7 @@ final class Scope {
 	 * @return bool
 	 */
 	public function limits_caps() {
-		return '' !== $this->role || array() !== $this->deny;
+		return null !== $this->roles || array() !== $this->deny || $this->granted_by > 0;
 	}
 
 	/**
@@ -171,16 +219,35 @@ final class Scope {
 			return false;
 		}
 
-		if ( '' !== $this->role ) {
-			$role = get_role( $this->role );
+		if ( $this->granted_by ) {
+			$granter = get_userdata( $this->granted_by );
 
-			// A role that has since been deleted caps the password at nothing.
-			if ( ! $role || empty( $role->capabilities[ $cap ] ) ) {
+			// user_can() re-enters map_meta_cap, but for a different user ID, so the Enforcer passes
+			// it straight through. It also handles multisite super admins correctly.
+			if ( ! $granter || ! user_can( $granter, $cap ) ) {
 				return false;
 			}
 		}
 
-		return true;
+		if ( null === $this->roles ) {
+			return true;
+		}
+
+		// Role names double as capabilities (`current_user_can( 'administrator' )`).
+		if ( in_array( $cap, $this->roles, true ) ) {
+			return true;
+		}
+
+		foreach ( $this->roles as $slug ) {
+			$role = get_role( $slug );
+
+			// A role deleted since the scope was saved simply contributes nothing.
+			if ( $role && ! empty( $role->capabilities[ $cap ] ) ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**
@@ -227,10 +294,16 @@ final class Scope {
 			$parts[] = __( 'Read-only', 'application-passwords-scoped' );
 		}
 
-		if ( '' !== $this->role ) {
-			$names = wp_roles()->get_names();
-			/* translators: %s: role name. */
-			$parts[] = sprintf( __( 'Up to %s', 'application-passwords-scoped' ), translate_user_role( $names[ $this->role ] ?? $this->role ) );
+		if ( null !== $this->roles ) {
+			$names  = wp_roles()->get_names();
+			$labels = array();
+			foreach ( $this->roles as $slug ) {
+				$labels[] = translate_user_role( $names[ $slug ] ?? $slug );
+			}
+			$parts[] = $labels
+				/* translators: %s: role names joined by " + ". */
+				? sprintf( __( 'As %s', 'application-passwords-scoped' ), implode( ' + ', $labels ) )
+				: __( 'No role permissions', 'application-passwords-scoped' );
 		}
 
 		if ( $this->deny ) {
@@ -252,6 +325,14 @@ final class Scope {
 				/* translators: %s: comma separated list of ability names. */
 				? sprintf( __( 'Abilities: %s', 'application-passwords-scoped' ), implode( ', ', $this->abilities ) )
 				: __( 'No abilities', 'application-passwords-scoped' );
+		}
+
+		if ( $this->granted_by ) {
+			$granter = get_userdata( $this->granted_by );
+			$parts[] = $granter
+				/* translators: %s: display name of the user who granted the password. */
+				? sprintf( __( 'Limited to what %s can do', 'application-passwords-scoped' ), $granter->display_name )
+				: __( 'Granter no longer exists (disabled)', 'application-passwords-scoped' );
 		}
 
 		if ( $this->expires ) {

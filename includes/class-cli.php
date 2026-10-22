@@ -56,8 +56,8 @@ class CLI {
 	 * <uuid>
 	 * : Application Password UUID.
 	 *
-	 * [--role=<role>]
-	 * : Role to use as a capability ceiling.
+	 * [--roles=<roles>]
+	 * : Comma separated roles whose capabilities the password may use, e.g. `author,wpseo_manager`. Pass an empty string to allow no role capabilities.
 	 *
 	 * [--deny=<groups>]
 	 * : Comma separated capability groups to withhold.
@@ -74,9 +74,12 @@ class CLI {
 	 * [--expires-in=<seconds>]
 	 * : Stop the password working this many seconds from now.
 	 *
+	 * [--granted-by=<user-id>]
+	 * : Also limit the password to what this user can do. The admin UI and REST API set this automatically when one user scopes another's password.
+	 *
 	 * ## EXAMPLES
 	 *
-	 *     wp application-password scope set admin 3f2a... --role=author --deny=plugins,users --expires-in=86400
+	 *     wp application-password scope set admin 3f2a... --roles=author,wpseo_manager --deny=plugins,users --expires-in=86400
 	 *     wp application-password scope set admin 3f2a... --abilities-only --abilities='core/get-site-info,my-plugin/*'
 	 *
 	 * @param array $args       Positional args.
@@ -87,17 +90,21 @@ class CLI {
 
 		$scope = Scope::from_array(
 			array(
-				'role'           => $assoc_args['role'] ?? '',
+				'roles'          => array_key_exists( 'roles', $assoc_args ) ? (string) $assoc_args['roles'] : null,
 				'deny'           => $assoc_args['deny'] ?? array(),
 				'read_only'      => ! empty( $assoc_args['read-only'] ),
 				'abilities'      => array_key_exists( 'abilities', $assoc_args ) ? (string) $assoc_args['abilities'] : null,
 				'abilities_only' => ! empty( $assoc_args['abilities-only'] ),
 				'expires_in'     => (int) ( $assoc_args['expires-in'] ?? 0 ),
+				'granted_by'     => (int) ( $assoc_args['granted-by'] ?? 0 ),
 			)
 		);
 
-		if ( isset( $assoc_args['role'] ) && $scope->role !== $assoc_args['role'] ) {
-			WP_CLI::error( sprintf( 'Unknown role: %s', $assoc_args['role'] ) );
+		if ( null !== $scope->roles ) {
+			$unknown = array_diff( array_filter( array_map( 'trim', explode( ',', (string) $assoc_args['roles'] ) ) ), $scope->roles );
+			if ( $unknown ) {
+				WP_CLI::error( sprintf( 'Unknown role(s): %s', implode( ', ', $unknown ) ) );
+			}
 		}
 
 		Scope_Store::set( $user_id, $uuid, $scope );

@@ -22,6 +22,20 @@
 	margin: 0.25em 0;
 }
 
+.app-password-scope-roles label.is-disabled {
+	color: #a7aaad;
+}
+
+.app-password-scope-extra-roles {
+	margin: 0.75em 0 0;
+	padding-top: 0.5em;
+	border-top: 1px solid #dcdcde;
+}
+
+.app-password-scope-extra-roles p {
+	margin: 0 0 0.25em;
+}
+
 .app-password-scope-groups {
 	display: grid;
 	grid-template-columns: repeat( auto-fill, minmax( 15em, 1fr ) );

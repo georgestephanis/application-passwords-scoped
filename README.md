@@ -14,20 +14,41 @@ Every restriction only removes access. A scope can never give a password more th
 
 | Restriction | Example | Where it's enforced |
 |---|---|---|
-| **Role ceiling** | An admin's password acts as at most an *Author* | `map_meta_cap` |
+| **Roles** | An admin's password acts as at most an *Author*, keeping *SEO Manager* but dropping *Forum Keymaster* | `map_meta_cap` |
 | **Denied capability groups** | "Never: manage plugins, manage users" | `map_meta_cap` |
 | **Read-only** | GET/HEAD/OPTIONS only | `rest_pre_dispatch` |
 | **Abilities allowlist** | Only `core/get-site-info`, `my-plugin/*` | `wp_ability_permission_result` |
 | **Abilities-only** | REST access limited to `/wp-abilities/v1` | `rest_pre_dispatch` |
 | **Expiry** | Stops working after 7 days | `wp_authenticate_application_password_errors` |
+| **Granter cap** *(automatic)* | A password an admin creates for someone else can't exceed what the admin can do | `map_meta_cap` |
 
 These combine, for example: an Author ceiling, no publishing, expiring in a week.
 
-### Why both role ceilings *and* capability groups?
+### Roles: a ladder plus toggles
+
+Core's roles nest: Administrator ⊃ Editor ⊃ Author ⊃ Contributor ⊃ Subscriber. Plugin roles usually don't. bbPress's Keymaster, Yoast's SEO Manager and similar roles are held *alongside* a core role and grant an unrelated set of capabilities. A single "at most X" ceiling can't express "keep SEO Manager, drop Keymaster".
+
+So a scope stores a **list** of roles (`roles: ["author", "wpseo_manager"]`). The password may use a capability only if the user has it *and* at least one listed role grants it. The UI presents that list as:
+
+- **Radio buttons for the core ladder**, with rungs above the user's own role shown but disabled.
+- **Checkboxes for every other role the user holds**, each kept or dropped independently.
+
+Which roles count as the ladder is filterable via `application_password_scope_hierarchical_roles`.
+
+### Scoping someone else's password
+
+An administrator can create passwords for other users. Without care, that's a way to mint credentials stronger than the creator's own. On multisite, for example, a site admin could create a password for a super admin. So whenever the acting user isn't the owner:
+
+- The plugin records **`granted_by`** on the password, even if no scope was requested. Every capability must then pass for *both* the owner and the granter. If the granter is later deleted, the password stops working.
+- The form greys out any role or toggle the granter couldn't hand over. It also says, by name, that the password can't do more than either user can.
+
+![An administrator scoping an Editor's password: Administrator is greyed out, and a Newsletter Editor role the admin doesn't hold can't be granted](.github/screenshots/admin-scoping-another-user.png)
+
+### Why both roles *and* capability groups?
 
 They answer different questions:
 
-- A **role ceiling** ("act as an Author") is easy for people to understand. It also covers capabilities from plugins that the scope author never heard of: if the Author role doesn't have `manage_woocommerce`, the password doesn't either.
+- A **role limit** ("act as an Author") is easy for people to understand. It also covers capabilities from plugins that the scope author never heard of: if the Author role doesn't have `manage_woocommerce`, the password doesn't either.
 - **Capability groups** ("anything except plugins") keep a high-trust integration's power while cutting the parts that make a leaked credential catastrophic. Raw capabilities like `promote_users` are too fine-grained for someone approving an app, so they are bundled into about a dozen named groups. The groups are filterable via `application_password_scope_capability_groups`.
 
 ### How the Abilities API fits
@@ -53,7 +74,7 @@ A scoped password could otherwise free itself. Any password with *any* restricti
 
 - `create_app_password`, `edit_app_password`, and `delete_app_password(s)`, so it can't mint an unscoped sibling or rewrite its own scope.
 - `edit_user`, `delete_user`, `promote_user`, and `remove_user` **on its own account**, so it can't change the account's email or password and then log in with a full cookie session.
-- On multisite, a password with a role ceiling or denied groups is removed from `site_admins` for that request, because `is_super_admin()` skips `map_meta_cap`. The technique is borrowed from [t3admin](https://github.com/georgestephanis/t3admin).
+- On multisite, a password with a role limit or denied groups is removed from `site_admins` for that request, because `is_super_admin()` skips `map_meta_cap`. The technique is borrowed from [t3admin](https://github.com/georgestephanis/t3admin).
 - Over XML-RPC, which has no read/write metadata, a password with request-level restrictions fails authentication instead of being silently under-enforced.
 
 A password can always `GET …/application-passwords/introspect`, so the client can discover what it was actually granted.
@@ -64,7 +85,7 @@ A password can always `GET …/application-passwords/introspect`, so the client 
 
 ```
 /wp-admin/authorize-application.php?app_name=My+Agent
-    &scope[role]=author
+    &scope[roles][]=author&scope[roles][]=wpseo_manager
     &scope[deny][]=plugins&scope[deny][]=users
     &scope[abilities_only]=1
     &scope[expires_in]=604800
@@ -90,7 +111,7 @@ A password can always `GET …/application-passwords/introspect`, so the client 
 **WP-CLI.**
 
 ```bash
-wp application-password scope set admin <uuid> --role=author --deny=plugins,users --expires-in=86400
+wp application-password scope set admin <uuid> --roles=author,wpseo_manager --deny=plugins,users --expires-in=86400
 wp application-password scope set admin <uuid> --abilities-only --abilities='core/get-site-info,my-plugin/*'
 wp application-password scope get admin <uuid> --format=summary
 wp application-password scope clear admin <uuid>

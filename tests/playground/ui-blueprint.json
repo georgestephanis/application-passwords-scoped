@@ -1,0 +1,28 @@
+{
+    "$schema": "https://playground.wordpress.net/blueprint-schema.json",
+    "landingPage": "/wp-admin/profile.php",
+    "preferredVersions": {
+        "php": "8.3",
+        "wp": "latest"
+    },
+    "steps": [
+        {
+            "step": "login",
+            "username": "admin"
+        },
+        {
+            "step": "activatePlugin",
+            "pluginPath": "application-passwords-scoped/application-passwords-scoped.php"
+        },
+        {
+            "step": "setSiteOptions",
+            "options": {
+                "permalink_structure": "/%postname%/"
+            }
+        },
+        {
+            "step": "runPHP",
+            "code": "<?php require '/wordpress/wp-load.php'; include WP_PLUGIN_DIR . '/application-passwords-scoped/.github/setup.php'; $eddie = get_userdata( wp_insert_user( array( 'user_login' => 'eddie', 'user_pass' => wp_generate_password(), 'user_email' => 'eddie@example.test', 'display_name' => 'Eddie (Editor)', 'role' => 'editor' ) ) ); $eddie->add_role( 'seo_manager' ); add_role( 'newsletter_editor', 'Newsletter Editor (demo)', array( 'read' => true, 'manage_newsletter' => true ) ); $eddie->add_role( 'newsletter_editor' );"
+        }
+    ]
+}
