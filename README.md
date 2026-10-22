@@ -163,10 +163,10 @@ Settled, and implemented as described above:
 - [#10](https://github.com/georgestephanis/application-passwords-scoped/issues/10) Plugins can register capability groups (with wildcards) and filter every decision. See [docs/plugin-authors.md](docs/plugin-authors.md).
 - [#11](https://github.com/georgestephanis/application-passwords-scoped/issues/11) New passwords default to full access; sites can filter the default, and people narrow from it.
 - [#12](https://github.com/georgestephanis/application-passwords-scoped/issues/12) Granter changes: passwords narrow with the granter and fail closed if they're deleted, with a filter to revoke instead.
+- [#14](https://github.com/georgestephanis/application-passwords-scoped/issues/14) Bypass audit done. Abilities executed directly in PHP, outside the API, are out of scope: that's code the site already trusts.
 
 Still open, tracked as sub-issues of [#2](https://github.com/georgestephanis/application-passwords-scoped/issues/2):
 
-- [#14](https://github.com/georgestephanis/application-passwords-scoped/issues/14) Audit enforcement for bypass paths
 - [#16](https://github.com/georgestephanis/application-passwords-scoped/issues/16) Read-only detection beyond HTTP methods (GraphQL, XML-RPC, POST reads)
 
 ## Development
