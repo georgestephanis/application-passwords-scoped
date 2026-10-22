@@ -51,6 +51,42 @@ class Scope_Store {
 	}
 
 	/**
+	 * Save a scope submitted by the current user: the one path for REST, forms and approvals.
+	 *
+	 * The granter is never taken from input. If someone other than the owner is acting, they become
+	 * the granter. If the owner is acting, an existing granter is kept: an admin's cap on a password
+	 * they set up for someone doesn't vanish because its owner edited the scope.
+	 *
+	 * @param int    $user_id Owner.
+	 * @param string $uuid    Application Password UUID.
+	 * @param mixed  $data    Untrusted scope data.
+	 * @return Scope The scope as saved.
+	 */
+	public static function save_from_request( $user_id, $uuid, $data ) {
+		$data   = is_array( $data ) ? $data : array();
+		$acting = get_current_user_id();
+
+		$data['granted_by'] = $acting && $acting !== (int) $user_id
+			? $acting
+			: self::get( $user_id, $uuid )->granted_by;
+
+		$scope = Scope::from_array( $data );
+		self::set( $user_id, $uuid, $scope );
+
+		/**
+		 * Fires after a scope is saved from a request, form or approval.
+		 *
+		 * @param Scope  $scope   Saved scope.
+		 * @param int    $user_id Owner.
+		 * @param string $uuid    Application Password UUID.
+		 * @param int    $acting  User who saved it.
+		 */
+		do_action( 'application_password_scope_saved', $scope, (int) $user_id, $uuid, $acting );
+
+		return $scope;
+	}
+
+	/**
 	 * Remove the scope for a password.
 	 *
 	 * @param int    $user_id User ID.

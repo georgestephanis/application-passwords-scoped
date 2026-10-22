@@ -22,6 +22,10 @@
 	margin: 0.25em 0;
 }
 
+.app-password-scope label[hidden] {
+	display: none;
+}
+
 .app-password-scope-roles label.is-disabled {
 	color: #a7aaad;
 }
@@ -59,4 +63,19 @@
 	padding: 0.5em 0.75em;
 	border-left: 4px solid #72aee6;
 	background: #f0f6fc;
+}
+
+.app-password-scope-editor {
+	margin-top: 0.25em;
+}
+
+.app-password-scope-edit-panel .app-password-scope {
+	margin-top: 0.5em;
+	padding: 0.5em 0.75em;
+	border: 1px solid #dcdcde;
+	background: #f6f7f7;
+}
+
+.app-password-scope-edit-status {
+	margin-left: 0.5em;
 }

@@ -77,6 +77,10 @@ class Enforcer {
 		add_filter( 'wp_ability_permission_result', array( __CLASS__, 'ability_permission' ), 10, 4 );
 		add_action( 'wp_delete_application_password', array( __CLASS__, 'cleanup' ), 10, 2 );
 		add_action( 'wp_create_application_password', array( __CLASS__, 'record_granter' ), 10, 2 );
+		add_action( 'delete_user', array( __CLASS__, 'granter_deleted' ) );
+		add_action( 'wpmu_delete_user', array( __CLASS__, 'granter_deleted' ) );
+		add_action( 'set_user_role', array( __CLASS__, 'granter_role_changed' ), 10, 3 );
+		add_action( 'remove_user_role', array( __CLASS__, 'granter_role_changed' ), 10, 2 );
 	}
 
 	/**
@@ -145,7 +149,21 @@ class Enforcer {
 			);
 		}
 
-		if ( ! self::is_rest_bound() && ( $scope->read_only || $scope->abilities_only || null !== $scope->abilities ) ) {
+		if ( defined( 'XMLRPC_REQUEST' ) && XMLRPC_REQUEST && $scope->block_xmlrpc ) {
+			$error->add(
+				'application_password_scope_no_xmlrpc',
+				__( 'This application password may not be used with XML-RPC.', 'application-passwords-scoped' )
+			);
+			return;
+		}
+
+		// Off REST, ability restrictions can never be enforced. Read-only can, per request: XML-RPC
+		// by method name, other endpoints when a plugin declares it (a GraphQL query rather than a
+		// mutation, say). See is_read_only(). This runs per XML-RPC call, because XML-RPC
+		// authenticates inside each method, after the method name is known.
+		$off_rest_blocked = $scope->abilities_only || null !== $scope->abilities || ( $scope->read_only && ! self::is_read_only( null ) );
+
+		if ( ! self::is_rest_bound() && $off_rest_blocked ) {
 			$error->add(
 				'application_password_scope_rest_only',
 				__( 'This application password is restricted to the REST API.', 'application-passwords-scoped' )
@@ -375,6 +393,66 @@ class Enforcer {
 	}
 
 	/**
+	 * Whether a request only reads.
+	 *
+	 * On REST the default is method-based: GET, HEAD and OPTIONS read, everything else writes. That
+	 * is the effective method: core applies `?_method=` and `X-HTTP-Method-Override` to the request
+	 * before dispatch, and routes on the result, so an override can't disguise a write.
+	 *
+	 * On XML-RPC the default is by method name: `get*` and `supported*` methods read (wp.getPosts,
+	 * mt.supportedMethods…), everything else writes. `system.multicall` counts as a write, since
+	 * one call can't vouch for the ones inside it.
+	 *
+	 * Anywhere else the default is "writes", because nothing here can tell. Plugins know better in both
+	 * directions: a GraphQL endpoint can say a POSTed query only reads and a mutation doesn't; a
+	 * REST route can say a POST search only reads, or that a GET has side effects.
+	 *
+	 * @param \WP_REST_Request|null $request REST request, or null off REST (inspect the globals).
+	 * @return bool
+	 */
+	public static function is_read_only( $request ) {
+		$xmlrpc_method = self::xmlrpc_method();
+
+		if ( $request instanceof \WP_REST_Request ) {
+			$default = in_array( $request->get_method(), array( 'GET', 'HEAD', 'OPTIONS' ), true );
+		} elseif ( null !== $xmlrpc_method ) {
+			$last    = substr( (string) strrchr( '.' . $xmlrpc_method, '.' ), 1 );
+			$default = 0 === strpos( $last, 'get' ) || 0 === strpos( $last, 'supported' );
+		} else {
+			$default = false;
+		}
+
+		/**
+		 * Filters whether a request only reads, for read-only Application Passwords.
+		 *
+		 * Return true only if the request can't change anything; read-only passwords trust it.
+		 *
+		 * @param bool                  $is_read_only  Default decision.
+		 * @param \WP_REST_Request|null $request       REST request, or null for a non-REST endpoint.
+		 * @param string|null           $xmlrpc_method XML-RPC method being called, if any.
+		 */
+		return (bool) apply_filters( 'application_password_scope_request_is_read_only', $default, $request, $xmlrpc_method );
+	}
+
+	/**
+	 * The XML-RPC method being called, or null outside XML-RPC. xmlrpc.php assigns the server to
+	 * the global before serving, and IXR parses the message before calling the method that
+	 * authenticates, so this is available whenever a password is checked.
+	 *
+	 * @return string|null
+	 */
+	private static function xmlrpc_method() {
+		if ( ! defined( 'XMLRPC_REQUEST' ) || ! XMLRPC_REQUEST ) {
+			return null;
+		}
+
+		$server = $GLOBALS['wp_xmlrpc_server'] ?? null;
+
+		// No parsed message means we can't tell; an empty name is never read-only.
+		return isset( $server->message->methodName ) ? (string) $server->message->methodName : '';
+	}
+
+	/**
 	 * Apply read-only and abilities-only to a REST request.
 	 *
 	 * @param \WP_REST_Request $request Request.
@@ -388,8 +466,12 @@ class Enforcer {
 		$route  = untrailingslashit( $request->get_route() );
 		$method = $request->get_method();
 
-		// Always let a password introspect itself so the client can discover what it was granted.
+		// Always let a password see what it was granted, and ask for more (Access_Requests). Neither
+		// can change what the password may do; only the owner approving a request can.
 		if ( 'GET' === $method && preg_match( '#^/wp/v2/users/(me|\d+)/application-passwords/introspect$#', $route ) ) {
+			return null;
+		}
+		if ( 0 === strpos( $route . '/', '/' . Access_Requests::NAMESPACE . '/access-requests/' ) && in_array( $method, array( 'GET', 'POST' ), true ) ) {
 			return null;
 		}
 
@@ -397,7 +479,7 @@ class Enforcer {
 			return self::error( __( 'This application password may only use the Abilities API.', 'application-passwords-scoped' ) );
 		}
 
-		if ( self::$scope->read_only && ! in_array( $method, array( 'GET', 'HEAD', 'OPTIONS' ), true ) ) {
+		if ( self::$scope->read_only && ! self::is_read_only( $request ) ) {
 			return self::error( __( 'This application password is read-only.', 'application-passwords-scoped' ) );
 		}
 
@@ -429,8 +511,11 @@ class Enforcer {
 	}
 
 	/**
-	 * When one user creates a password for another, cap it at what the creator can do — even if
-	 * the request set no scope at all. Without this, an admin with `edit_users` but no
+	 * Apply the default scope to every new password, and cap it at its creator when one user
+	 * creates a password for another — even if the request set no scope at all.
+	 *
+	 * The default is full access (#11). A scope sent with the same REST request is saved after this
+	 * and replaces the default, keeping the granter. People narrow from whatever the default is. Without this, an admin with `edit_users` but no
 	 * `install_plugins` (say, on multisite) could mint a plugin-installing password for a
 	 * super admin. A scope sent in the same REST request is saved after this and keeps the granter.
 	 *
@@ -439,14 +524,72 @@ class Enforcer {
 	 */
 	public static function record_granter( $user_id, $item ) {
 		$acting = get_current_user_id();
+		$scope  = Scope::default_for( (int) $user_id );
 
-		if ( ! $acting || $acting === (int) $user_id ) {
+		if ( $acting && $acting !== (int) $user_id ) {
+			$scope->granted_by = $acting;
+		}
+
+		if ( $scope->is_restricted() ) {
+			Scope_Store::set( $user_id, $item['uuid'], $scope );
+		}
+	}
+
+	/**
+	 * A granter is being deleted.
+	 *
+	 * @param int $granter_id User being deleted.
+	 */
+	public static function granter_deleted( $granter_id ) {
+		self::maybe_revoke_granted( (int) $granter_id, 'deleted' );
+	}
+
+	/**
+	 * A granter's roles changed. Only removals matter: a granter gaining a role can't loosen
+	 * anything, because the owner's own capabilities still apply.
+	 *
+	 * @param int    $granter_id User whose role changed.
+	 * @param string $role       New role (set_user_role) or removed role (remove_user_role).
+	 * @param array  $old_roles  Previous roles (set_user_role only).
+	 */
+	public static function granter_role_changed( $granter_id, $role, $old_roles = null ) {
+		if ( 'set_user_role' === current_action() && ( ! is_array( $old_roles ) || ! array_diff( $old_roles, array( $role ) ) ) ) {
 			return;
 		}
 
-		$scope             = Scope_Store::get( $user_id, $item['uuid'] );
-		$scope->granted_by = $acting;
-		Scope_Store::set( $user_id, $item['uuid'], $scope );
+		self::maybe_revoke_granted( (int) $granter_id, 'demoted' );
+	}
+
+	/**
+	 * Revoke the passwords someone created for other users, if a filter says to.
+	 *
+	 * By default nothing is revoked. The passwords keep being capped at what the granter can do
+	 * now: narrower after a demotion, and nothing at all once the granter is deleted. They fail
+	 * closed either way, so revoking is a tidiness and visibility choice, not a security one.
+	 *
+	 * @param int    $granter_id Granter.
+	 * @param string $reason     'deleted' or 'demoted'.
+	 */
+	private static function maybe_revoke_granted( $granter_id, $reason ) {
+		foreach ( Scope_Store::granted_by( array( $granter_id ) ) as $row ) {
+			if ( $row['user_id'] === $granter_id ) {
+				continue;
+			}
+
+			/**
+			 * Filters whether to revoke a password someone created for another user, when that
+			 * person is deleted or loses a role.
+			 *
+			 * @param bool   $revoke     Whether to revoke. Default false.
+			 * @param string $reason     'deleted' or 'demoted'.
+			 * @param int    $owner_id   User the password belongs to.
+			 * @param string $uuid       Application Password UUID.
+			 * @param int    $granter_id User who created it.
+			 */
+			if ( apply_filters( 'application_password_scope_revoke_granted', false, $reason, $row['user_id'], $row['uuid'], $granter_id ) ) {
+				\WP_Application_Passwords::delete_application_password( $row['user_id'], $row['uuid'] );
+			}
+		}
 	}
 
 	/**

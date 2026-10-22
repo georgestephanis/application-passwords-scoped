@@ -88,29 +88,92 @@ class Capability_Groups {
 		/**
 		 * Filters the capability groups that can be withheld from a scoped Application Password.
 		 *
+		 * Caps may be wildcard patterns (`manage_shop_*`). See also Capability_Groups::register().
+		 *
 		 * @param array $groups Map of group slug => { label, description, caps[] }.
 		 */
-		return apply_filters( 'application_password_scope_capability_groups', $groups );
+		return apply_filters( 'application_password_scope_capability_groups', array_merge( $groups, self::$registered ) );
 	}
 
 	/**
-	 * Flatten a list of group slugs into the primitive caps they cover.
+	 * Groups registered with register(), merged into all() before the filter runs.
+	 *
+	 * @var array<string, array>
+	 */
+	private static $registered = array();
+
+	/**
+	 * Register a capability group. Call on or before `init`; the group then appears on the scope
+	 * form and in the REST schema. Equivalent to filtering application_password_scope_capability_groups.
+	 *
+	 * `caps` may contain wildcard patterns, e.g. `manage_woocommerce*` or `*_shop_order*`, so a group
+	 * keeps covering capabilities a plugin adds later.
+	 *
+	 * @param string $slug Group slug: lowercase letters, numbers, `_` and `-`.
+	 * @param array  $args { label: string, description: string, caps: string[] }.
+	 * @return bool False if the slug or args are invalid.
+	 */
+	public static function register( $slug, array $args ) {
+		if ( ! preg_match( '/^[a-z0-9_-]+$/', $slug ) || empty( $args['label'] ) || empty( $args['caps'] ) ) {
+			return false;
+		}
+
+		self::$registered[ $slug ] = array(
+			'label'       => (string) $args['label'],
+			'description' => (string) ( $args['description'] ?? '' ),
+			'caps'        => array_values( array_map( 'strval', (array) $args['caps'] ) ),
+		);
+
+		return true;
+	}
+
+	/**
+	 * Split a list of group slugs into exact capability names and wildcard patterns.
 	 *
 	 * @param string[] $slugs Group slugs.
-	 * @return array<string, true> Set of capability names.
+	 * @return array{caps: array<string, true>, patterns: string[]}
 	 */
 	public static function caps_for( array $slugs ) {
-		$groups = self::all();
-		$caps   = array();
+		$groups   = self::all();
+		$caps     = array();
+		$patterns = array();
 
 		foreach ( $slugs as $slug ) {
 			if ( isset( $groups[ $slug ] ) ) {
 				foreach ( $groups[ $slug ]['caps'] as $cap ) {
-					$caps[ $cap ] = true;
+					if ( false !== strpbrk( $cap, '*?[' ) ) {
+						$patterns[] = $cap;
+					} else {
+						$caps[ $cap ] = true;
+					}
 				}
 			}
 		}
 
-		return $caps;
+		return array(
+			'caps'     => $caps,
+			'patterns' => array_values( array_unique( $patterns ) ),
+		);
+	}
+
+	/**
+	 * Whether a capability is covered by a caps_for() result.
+	 *
+	 * @param string $cap     Capability.
+	 * @param array  $covered caps_for() result.
+	 * @return bool
+	 */
+	public static function covers( $cap, array $covered ) {
+		if ( isset( $covered['caps'][ $cap ] ) ) {
+			return true;
+		}
+
+		foreach ( $covered['patterns'] as $pattern ) {
+			if ( fnmatch( $pattern, $cap, FNM_NOESCAPE ) ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 }

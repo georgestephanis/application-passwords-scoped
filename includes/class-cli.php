@@ -71,6 +71,9 @@ class CLI {
 	 * [--abilities-only]
 	 * : Restrict REST access to the Abilities API.
 	 *
+	 * [--block-xmlrpc]
+	 * : Refuse this password on XML-RPC.
+	 *
 	 * [--expires-in=<seconds>]
 	 * : Stop the password working this many seconds from now.
 	 *
@@ -95,6 +98,7 @@ class CLI {
 				'read_only'      => ! empty( $assoc_args['read-only'] ),
 				'abilities'      => array_key_exists( 'abilities', $assoc_args ) ? (string) $assoc_args['abilities'] : null,
 				'abilities_only' => ! empty( $assoc_args['abilities-only'] ),
+				'block_xmlrpc'   => ! empty( $assoc_args['block-xmlrpc'] ),
 				'expires_in'     => (int) ( $assoc_args['expires-in'] ?? 0 ),
 				// Keep an existing granter unless one is given: dropping it would silently loosen the scope.
 				'granted_by'     => (int) ( $assoc_args['granted-by'] ?? Scope_Store::get( $user_id, $uuid )->granted_by ),

@@ -35,6 +35,7 @@ includes/
 ├── class-admin.php                Profile + Authorize Application form fields, list-table column,
 │                                  Plugins-screen and delete-user warnings.
 ├── class-lifecycle.php            Suspends scoped passwords on deactivation, restores on activation.
+├── class-access-requests.php      Apps asking for a broader scope; owner approves/denies (#8).
 └── class-cli.php                  `wp application-password scope get|set|clear|groups`.
 assets/admin.js                    Adds `scope` to core's JS REST requests via wp.hooks filters.
 assets/admin.css
@@ -58,7 +59,7 @@ Everything hangs off hooks core already ships. Don't patch or replace core behav
 | Hook | Class | Purpose |
 | --- | --- | --- |
 | `application_password_did_authenticate` | Enforcer | Record which password authenticated and load its scope. |
-| `wp_authenticate_application_password_errors` | Enforcer | Fail auth for expired passwords, and for request-level scopes anywhere but REST (XML-RPC, plugin endpoints). |
+| `wp_authenticate_application_password_errors` | Enforcer | Fail auth for expired passwords, Block XML-RPC, and request-level scopes off REST unless the request is read-only (XML-RPC `get*`, plugin-declared). XML-RPC authenticates per method call, so this sees the method name. |
 | `map_meta_cap` @ `PHP_INT_MAX` | Enforcer | Return `do_not_allow` if any required primitive cap is out of scope. The backbone. |
 | `editable_roles` | Enforcer | Hide roles the scope couldn't exercise, so a scoped password can't create or promote users into them. |
 | `rest_pre_insert_user` | Enforcer | A user created without `roles` gets no role if `default_role` is out of scope. |
@@ -66,6 +67,7 @@ Everything hangs off hooks core already ships. Don't patch or replace core behav
 | `rest_pre_dispatch` @ `PHP_INT_MIN` | Enforcer | Read-only (HTTP method) and abilities-only (route) gates, before any plugin can short-circuit. Also runs per `/batch/v1` sub-request. |
 | `rest_request_before_callbacks` @ `PHP_INT_MAX` | Enforcer | The same gates again, immediately before the route's permission callback and handler. |
 | `rest_post_dispatch` @ `PHP_INT_MAX` | Enforcer | The same gates on the way out, so an out-of-scope response is never returned, even if a plugin overrode the error. |
+| `delete_user`, `wpmu_delete_user`, `set_user_role`, `remove_user_role` | Enforcer | Offer the granter's passwords to `application_password_scope_revoke_granted` (#12). |
 | `wp_ability_permission_result` | Enforcer | Ability allowlist; read-only passwords only run `readonly`-annotated abilities. |
 | `wp_create_application_password` | Enforcer, Admin | Record `granted_by` when one user creates a password for another; no-JS authorize form. |
 | `wp_delete_application_password` | Enforcer | Delete the scope with its password. |
@@ -91,8 +93,13 @@ granter and relies on that.
   When you add a capability rule, ask what else the password could do to get it back: create a
   user, edit a user, reset a password, install a plugin. Add a smoke test that tries the escape,
   and check it fails against the old code.
-- `granted_by` is **always set server-side** from `get_current_user_id()`, never from request
-  input. Both the REST field and `Enforcer::record_granter()` overwrite whatever was submitted.
+- `granted_by` is **always set server-side**, never from request input. Every save from a request,
+  form or approval goes through `Scope_Store::save_from_request()`: a non-owner acting becomes the
+  granter, and an owner editing keeps the existing one.
+- **Read-only is decided by `Enforcer::is_read_only()`** and nowhere else. On REST it uses the
+  effective method after `_method` / `X-HTTP-Method-Override`, so an override can't disguise a write.
+- **Access requests and introspect are the only things a restricted password can always do.**
+  Neither changes what it may do; only an owner's approval can. Keep it that way.
 - `Scope::from_array()` takes untrusted input from REST, forms, CLI and the authorize URL. It must
   allowlist every field and drop unknown values. When a value is invalid, fail closed: an unknown
   role means *no* capabilities from that role, not "ignore the restriction".

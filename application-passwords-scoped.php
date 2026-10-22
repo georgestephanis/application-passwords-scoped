@@ -28,6 +28,7 @@ require_once __DIR__ . '/includes/class-enforcer.php';
 require_once __DIR__ . '/includes/class-rest.php';
 require_once __DIR__ . '/includes/class-admin.php';
 require_once __DIR__ . '/includes/class-lifecycle.php';
+require_once __DIR__ . '/includes/class-access-requests.php';
 
 // Scoped passwords are suspended while the plugin is inactive, rather than silently regaining full
 // access. Network-only on multisite: scopes are per user, and users span the whole network.
@@ -37,6 +38,7 @@ register_deactivation_hook( __FILE__, array( __NAMESPACE__ . '\\Lifecycle', 'dea
 Enforcer::init();
 REST::init();
 Admin::init();
+Access_Requests::init();
 
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	require_once __DIR__ . '/includes/class-cli.php';

@@ -78,6 +78,10 @@ class REST {
 					'description' => __( 'Restrict REST access to the Abilities API.', 'application-passwords-scoped' ),
 					'type'        => 'boolean',
 				),
+				'block_xmlrpc'   => array(
+					'description' => __( 'Refuse this password on XML-RPC.', 'application-passwords-scoped' ),
+					'type'        => 'boolean',
+				),
 				'expires'        => array(
 					'description' => __( 'Unix timestamp after which the password stops working. 0 for never.', 'application-passwords-scoped' ),
 					'type'        => 'integer',
@@ -126,13 +130,10 @@ class REST {
 	 * @return true
 	 */
 	public static function update_scope( $value, $item, $field, $request ) {
-		$user_id = self::user_id( $request );
-		$value   = is_array( $value ) ? $value : array();
-
-		// Never trust a submitted granter: record whoever is acting, unless it's the owner.
-		$value['granted_by'] = get_current_user_id() === $user_id ? 0 : get_current_user_id();
-
-		Scope_Store::set( $user_id, $item['uuid'], Scope::from_array( $value ) );
+		// No server-side "narrowing only" check here (#8). Whoever reaches this endpoint can already
+		// create or edit this password with any scope, so a check would protect nothing. Narrowing
+		// is a consent UX on the authorize screen; apps that need more use Access_Requests.
+		Scope_Store::save_from_request( self::user_id( $request ), $item['uuid'], $value );
 
 		return true;
 	}

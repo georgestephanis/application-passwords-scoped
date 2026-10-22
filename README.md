@@ -16,13 +16,29 @@ Every restriction only removes access. A scope can never give a password more th
 | --- | --- | --- |
 | **Roles** | An admin's password acts as at most an *Author*, keeping *SEO Manager* but dropping *Forum Keymaster* | `map_meta_cap` |
 | **Denied capability groups** | "Never: manage plugins, manage users" | `map_meta_cap` |
-| **Read-only** | GET/HEAD/OPTIONS only | `rest_pre_dispatch` |
+| **Read-only** | REST `GET`/`HEAD`/`OPTIONS` (the effective method, after `_method` overrides), XML-RPC `get*` methods, and anything a plugin declares read-only, such as a GraphQL query | REST dispatch filters, XML-RPC auth |
 | **Abilities allowlist** | Only `core/get-site-info`, `my-plugin/*` | `wp_ability_permission_result` |
 | **Abilities-only** | REST access limited to `/wp-abilities/v1` | `rest_pre_dispatch` |
+| **Block XML-RPC** | Refused on XML-RPC; REST, GraphQL and other endpoints still work | `wp_authenticate_application_password_errors` |
 | **Expiry** | Stops working after 7 days | `wp_authenticate_application_password_errors` |
 | **Granter cap** *(automatic)* | A password an admin creates for someone else can't exceed what the admin can do | `map_meta_cap` |
 
 These combine, for example: an Author ceiling, no publishing, expiring in a week.
+
+New passwords get **full access** unless someone narrows them, matching core today. Sites can change the default with the `application_password_scope_default` filter. Scopes can be **edited** later from the passwords list ("Edit access") or with a REST `PUT`.
+
+### Asking for more access
+
+On the authorize screen, an app's requested scope is the most it can get. The person approving can narrow it further, but anything broader isn't offered: roles above the request are hidden, and restrictions the app asked for are locked on.
+
+If the app later needs more, it asks with its own password:
+
+```http
+POST /wp-json/application-passwords-scoped/v1/access-requests
+{ "scope": { "read_only": true }, "reason": "The dashboard needs to list users." }
+```
+
+The owner sees a notice in wp-admin comparing the current and requested access, and approves or denies it. The app can check the outcome at `GET …/access-requests/<uuid>`, or with introspect. A password can't widen its own scope any other way.
 
 ### Roles: a ladder plus toggles
 
@@ -80,9 +96,13 @@ A scoped password could otherwise free itself. Any password with *any* restricti
 
 A password can always `GET …/application-passwords/introspect`, so the client can discover what it was actually granted.
 
-### Deactivating the plugin removes every restriction
+### Deactivating the plugin suspends scoped passwords
 
-Core doesn't know about scopes. If this plugin is deactivated, every scoped password silently goes back to its owner's full access. The Plugins screen warns about this whenever scoped passwords exist. A plugin can't fix it, which makes it the strongest argument for doing this in core ([#13](https://github.com/georgestephanis/application-passwords-scoped/issues/13)).
+Core doesn't know about scopes, so without this plugin a scoped password would silently regain its owner's full access. Instead, deactivating the plugin **suspends** every scoped password: it stops working, and its name says why. Reactivating restores them exactly, and nothing is deleted. A plugin can't cover a fatal error or missing files, though, which is the strongest argument for doing this in core ([#13](https://github.com/georgestephanis/application-passwords-scoped/issues/13)).
+
+### When a granter is deleted or demoted
+
+A password someone created for another user stays capped at what that person can do *now*. It narrows if they're demoted, and stops working entirely if they're deleted. The delete-user screen lists the passwords that will stop. Sites that would rather revoke them can return `true` from `application_password_scope_revoke_granted`.
 
 ## Interfaces
 
@@ -100,7 +120,7 @@ Core doesn't know about scopes. If this plugin is deactivated, every scoped pass
 
 ![Abilities section of the scope form: abilities-only mode and an allowlist limited to core/get-site-info](.github/screenshots/authorize-abilities.jpg)
 
-**Profile screen.** A collapsible *Limit what this password can do* section under *Add New Application Password*, and an *Access* column in the list table.
+**Profile screen.** A collapsible *Limit what this password can do* section under *Add New Application Password*, and an *Access* column in the list table with an inline *Edit access* form.
 
 ![Application Passwords list table with an Access column summarizing each password's scope](.github/screenshots/profile-list-table.jpg)
 
@@ -134,17 +154,20 @@ Almost everything was possible with existing hooks, which is a credit to the 5.6
 - [#7](https://github.com/georgestephanis/application-passwords-scoped/issues/7) Standard authorize-flow protocol for requesting and reporting scopes
 - [#13](https://github.com/georgestephanis/application-passwords-scoped/issues/13) Deactivating the plugin silently removes every restriction
 
-## Open questions
+## Design decisions
 
-Provisional design decisions are tracked as sub-issues of [#2](https://github.com/georgestephanis/application-passwords-scoped/issues/2):
+Settled, and implemented as described above:
 
-- [#8](https://github.com/georgestephanis/application-passwords-scoped/issues/8) Can approvers loosen what an app requested?
-- [#9](https://github.com/georgestephanis/application-passwords-scoped/issues/9) Should scopes be editable after creation?
-- [#10](https://github.com/georgestephanis/application-passwords-scoped/issues/10) Capability group granularity and plugin-registered groups
-- [#11](https://github.com/georgestephanis/application-passwords-scoped/issues/11) Default scopes for new passwords (e.g. AI agents)
-- [#12](https://github.com/georgestephanis/application-passwords-scoped/issues/12) Granter cap: semantics when the granter changes or is deleted
+- [#8](https://github.com/georgestephanis/application-passwords-scoped/issues/8) Approvers can only narrow what an app requested. Apps ask for more with an access request.
+- [#9](https://github.com/georgestephanis/application-passwords-scoped/issues/9) Scopes are editable after creation.
+- [#10](https://github.com/georgestephanis/application-passwords-scoped/issues/10) Plugins can register capability groups (with wildcards) and filter every decision. See [docs/plugin-authors.md](docs/plugin-authors.md).
+- [#11](https://github.com/georgestephanis/application-passwords-scoped/issues/11) New passwords default to full access; sites can filter the default, and people narrow from it.
+- [#12](https://github.com/georgestephanis/application-passwords-scoped/issues/12) Granter changes: passwords narrow with the granter and fail closed if they're deleted, with a filter to revoke instead.
+
+Still open, tracked as sub-issues of [#2](https://github.com/georgestephanis/application-passwords-scoped/issues/2):
+
 - [#14](https://github.com/georgestephanis/application-passwords-scoped/issues/14) Audit enforcement for bypass paths
-- [#15](https://github.com/georgestephanis/application-passwords-scoped/issues/15) Document how plugin capabilities interact with scopes
+- [#16](https://github.com/georgestephanis/application-passwords-scoped/issues/16) Read-only detection beyond HTTP methods (GraphQL, XML-RPC, POST reads)
 
 ## Development
 

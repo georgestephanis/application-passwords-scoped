@@ -164,6 +164,68 @@ check "custom endpoint, read-only refused"  "$(custom readonly read)"           
 expect readonly GET  /aps-test/v1/can/read ok
 expect readonly POST /aps-test/v1/short-circuit "$OOS"
 
+# Plugins can declare which requests only read (#16): a GraphQL query over POST, a POST search.
+gql() { "${CURL[@]}" -u "admin:$(pw "$1")" -H 'Content-Type: application/json' -d "{\"query\":\"$2\"}" "$URL/?aps_graphql=1" | grep -o '"user":[0-9]*' | cut -d: -f2; }
+check "graphql query, read-only password"    "$(gql readonly '{ posts { id } }')"           1
+check "graphql mutation, read-only password" "$(gql readonly 'mutation { deletePost }')"    0
+check "graphql mutation, unscoped password"  "$(gql full 'mutation { deletePost }')"        1
+expect readonly POST /aps-test/v1/search ok '{}'
+
+# Method override (?_method=, X-HTTP-Method-Override): the gate sees the effective method.
+expect readonly GET  "/wp/v2/posts/1?_method=DELETE" "$OOS"
+ovr() { "${CURL[@]}" -u "admin:$(pw readonly)" -H 'X-HTTP-Method-Override: DELETE' -X POST "$URL/wp-json/wp/v2/posts/1" | grep -o '"code":"[^"]*"' | cut -d'"' -f4; }
+check "override header, read-only" "$(ovr)" "$OOS"
+expect readonly POST "/wp/v2/posts?_method=GET" ok
+
+# XML-RPC: read-only by method name; Block XML-RPC toggle.
+xcall() { # scope method
+	"${CURL[@]}" "$URL/xmlrpc.php" -H 'Content-Type: text/xml' \
+		-d "<?xml version=\"1.0\"?><methodCall><methodName>$2</methodName><params><param><value>1</value></param><param><value>admin</value></param><param><value>$(pw "$1")</value></param><param><value><struct></struct></value></param></params></methodCall>" |
+		grep -q faultCode && echo fault || echo ok
+}
+check "xmlrpc read-only, wp.getOptions"  "$(xcall readonly wp.getOptions)"  ok
+check "xmlrpc read-only, wp.setOptions"  "$(xcall readonly wp.setOptions)"  fault
+UB="<?xml version=\"1.0\"?><methodCall><methodName>wp.getUsersBlogs</methodName><params><param><value>admin</value></param><param><value>$(pw readonly)</value></param></params></methodCall>"
+check "xmlrpc read-only, wp.getUsersBlogs" "$("${CURL[@]}" "$URL/xmlrpc.php" -H 'Content-Type: text/xml' -d "$UB" | grep -q faultCode && echo fault || echo ok)" ok
+check "xmlrpc unscoped, wp.setOptions"   "$(xcall full wp.setOptions)"      ok
+check "xmlrpc blocked, wp.getOptions"    "$(xcall noxmlrpc wp.getOptions)"  fault
+expect noxmlrpc GET /wp/v2/plugins ok
+MC="<?xml version=\"1.0\"?><methodCall><methodName>system.multicall</methodName><params><param><value><array><data><value><struct><member><name>methodName</name><value>wp.getOptions</value></member><member><name>params</name><value><array><data><value>1</value><value>admin</value><value>$(pw readonly)</value></data></array></value></member></struct></value></data></array></value></param></params></methodCall>"
+check "xmlrpc read-only, system.multicall" "$("${CURL[@]}" "$URL/xmlrpc.php" -H 'Content-Type: text/xml' -d "$MC" | grep -q 'Software Name' && echo ok || echo fault)" fault
+
+# Plugin-registered group with a wildcard (#10).
+expect_can noseo manage_seo true
+expect_can noseo edit_posts true
+
+# Default scope filter (#11).
+expect defaulted POST /wp/v2/posts "$OOS" "$DRAFT"
+
+# Editing a scope (#9): PUT with the unscoped password changes another password's scope.
+EDITME="$(pw editme_uuid)"
+expect full POST "/wp/v2/users/me/application-passwords/$EDITME" ok '{"name":"editme","scope":{"deny":["plugins"]}}'
+expect editme POST /wp/v2/posts ok "$DRAFT"
+expect editme GET  /wp/v2/plugins rest_cannot_view_plugins
+# A scoped password still can't edit its own scope.
+expect editme POST "/wp/v2/users/me/application-passwords/$EDITME" rest_cannot_edit_application_password '{"name":"editme","scope":{}}'
+# The owner editing keeps an existing granter.
+GRANTED="$(pw granted_uuid)"
+expect full POST "/wp/v2/users/me/application-passwords/$GRANTED" ok '{"name":"granted","scope":{}}'
+expect_can granted manage_options false
+
+# Access requests (#8): the password asks, the owner decides.
+ASKER="$(pw asker_uuid)"
+expect asker GET  /wp/v2/users "$OOS"
+expect asker POST /application-passwords-scoped/v1/access-requests ok '{"scope":{"read_only":true},"reason":"Need to list users"}'
+check "access request pending" "$("${CURL[@]}" -u "admin:$(pw asker)" "$URL/wp-json/application-passwords-scoped/v1/access-requests/$ASKER" | grep -o '"status":"[a-z]*"')" '"status":"pending"'
+expect full  POST /application-passwords-scoped/v1/access-requests ok '{"scope":{"read_only":true}}'
+"${CURL[@]}" "$URL/?aps_decide=$ASKER&decision=approve" > /dev/null
+expect asker GET  /wp/v2/users ok
+expect asker POST /wp/v2/posts "$OOS" "$DRAFT"
+
+# Granter deleted (#12): kept by default, revoked when the filter says so.
+check "granter deleted, default"   "$("${CURL[@]}" "$URL/?aps_revoke_test=0" | grep -o '"survived":[a-z]*')" '"survived":true'
+check "granter deleted, filter on" "$("${CURL[@]}" "$URL/?aps_revoke_test=1" | grep -o '"survived":[a-z]*')" '"survived":false'
+
 # Denied groups (plugins, users).
 expect noplugins GET  /wp/v2/plugins rest_cannot_view_plugins
 expect noplugins POST /wp/v2/settings ok '{"blogname":"Smoke"}'
@@ -188,13 +250,15 @@ expect abilities GET /wp/v2/users/me/application-passwords/introspect ok
 expect expired  GET /wp/v2/users/me/application-passwords/introspect 'application_password_expired|rest_not_logged_in'
 expect expiring GET /wp/v2/users/me/application-passwords/introspect ok
 
-# XML-RPC: capability scopes work; request-level scopes refuse to authenticate.
+# XML-RPC: capability scopes work; abilities scopes refuse to authenticate.
 xmlrpc() {
 	"${CURL[@]}" "$URL/xmlrpc.php" -H 'Content-Type: text/xml' \
 		-d "<?xml version=\"1.0\"?><methodCall><methodName>wp.getOptions</methodName><params><param><value>1</value></param><param><value>admin</value></param><param><value>$(pw "$1")</value></param></params></methodCall>"
 }
 if xmlrpc noplugins | grep -q 'Software Name'; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL xmlrpc noplugins should authenticate"; fi
-if xmlrpc readonly | grep -q 'faultCode'; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL xmlrpc readonly should be refused"; fi
+if xmlrpc abilities | grep -q 'faultCode'; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL xmlrpc abilities-only should be refused"; fi
+# Read-only passwords may read over XML-RPC (wp.getOptions); writes are covered above.
+if xmlrpc readonly | grep -q 'Software Name'; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL xmlrpc readonly should read"; fi
 
 # Deactivation suspends scoped passwords instead of unlocking them; reactivation restores them
 # (#13). Runs last because it changes plugin state.

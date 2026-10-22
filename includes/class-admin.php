@@ -49,7 +49,8 @@ class Admin {
 
 		$url = plugin_dir_url( FILE ) . 'assets/';
 		wp_enqueue_style( 'application-passwords-scoped', $url . 'admin.css', array(), VERSION );
-		wp_enqueue_script( 'application-passwords-scoped', $url . 'admin.js', array( 'jquery', 'wp-hooks' ), VERSION, true );
+		wp_enqueue_script( 'application-passwords-scoped', $url . 'admin.js', array( 'jquery', 'wp-hooks', 'wp-api-fetch', 'wp-i18n' ), VERSION, true );
+		wp_set_script_translations( 'application-passwords-scoped', 'application-passwords-scoped' );
 	}
 
 	/**
@@ -58,7 +59,7 @@ class Admin {
 	 * @param \WP_User $user Profile user.
 	 */
 	public static function render_profile_fields( $user ) {
-		self::render_fields( new Scope(), $user, false );
+		self::render_fields( Scope::default_for( $user->ID ), $user );
 	}
 
 	/**
@@ -80,33 +81,68 @@ class Admin {
 			echo '<p class="app-password-scope-requested">';
 			printf(
 				/* translators: %s: summary of requested restrictions. */
-				esc_html__( 'This application asked for limited access: %s', 'application-passwords-scoped' ),
+				esc_html__( 'This application asked for limited access: %s. You can limit it further, but not give it more. If it needs more later, it can ask, and you will be able to approve or deny that.', 'application-passwords-scoped' ),
 				'<strong>' . esc_html( $requested->summary() ) . '</strong>'
 			);
 			echo '</p>';
 		}
 
-		self::render_fields( $requested, $user, true );
+		self::render_fields(
+			$requested,
+			$user,
+			array(
+				'open'  => true,
+				'limit' => $requested->is_restricted() ? $requested : null,
+			)
+		);
+
+		if ( $requested->is_restricted() ) {
+			// For the no-JS path; save_no_js() narrows the submission to this. Disabled inputs
+			// aren't posted, so locked restrictions would otherwise be lost.
+			printf( '<input type="hidden" name="%s" value="%s" />', esc_attr( self::FIELD . '_requested' ), esc_attr( wp_json_encode( $requested->to_array() ) ) );
+		}
 	}
 
 	/**
-	 * Shared field markup.
+	 * Shared field markup for the create, authorize and edit forms.
 	 *
 	 * @param Scope    $scope Initial values.
 	 * @param \WP_User $user  User the password is for.
-	 * @param bool     $open  Whether to expand the section initially.
+	 * @param array    $args  {
+	 *     Optional. Rendering options.
+	 *
+	 *     @type bool       $open  Expand the section initially. Default: when $scope is restricted.
+	 *     @type Scope|null $limit Narrowing-only mode: anything looser than this is locked or hidden.
+	 *     @type string     $field Input name prefix; must be unique per form on the page.
+	 *     @type string     $class Extra class on the root element.
+	 * }.
 	 */
-	private static function render_fields( Scope $scope, $user, $open ) {
-		$field     = self::FIELD;
+	private static function render_fields( Scope $scope, $user, array $args = array() ) {
+		$args      = wp_parse_args(
+			$args,
+			array(
+				'open'  => false,
+				'limit' => null,
+				'field' => self::FIELD,
+				'class' => '',
+			)
+		);
+		$limit     = $args['limit'];
+		$field     = $args['field'];
 		$names     = wp_roles()->get_names();
 		$ladder    = Scope::hierarchical_roles();
 		$own_core  = array_values( array_intersect( $ladder, (array) $user->roles ) );
 		$acting    = wp_get_current_user();
 		$for_other = $acting->ID !== $user->ID;
 
-		// The highest selectable rung is the lower of the owner's and (when scoping someone
-		// else's password) the acting user's. Anything above it is shown but disabled.
-		$own_rank  = max( self::ladder_rank( $user, $ladder ), $for_other ? self::ladder_rank( $acting, $ladder ) : 0 );
+		// The highest selectable rung is the lowest of the owner's, the acting user's (when scoping
+		// someone else's password) and the limit's. Anything above it is shown but disabled.
+		$own_rank   = max( self::ladder_rank( $user, $ladder ), $for_other ? self::ladder_rank( $acting, $ladder ) : 0 );
+		$limit_rank = 0;
+		if ( $limit && null !== $limit->roles ) {
+			$limit_core = array_values( array_intersect( $ladder, $limit->roles ) );
+			$limit_rank = $limit_core ? (int) array_search( $limit_core[0], $ladder, true ) : count( $ladder );
+		}
 		$extras    = array_values( array_diff( (array) $user->roles, $ladder ) );
 		$abilities = function_exists( 'wp_get_abilities' ) ? wp_get_abilities() : array();
 
@@ -117,22 +153,26 @@ class Admin {
 			$base_role      = $requested_core ? $requested_core[0] : '__none__';
 
 			// A request for a role above the user's own is the same as no limit.
-			if ( $requested_core && array_search( $base_role, $ladder, true ) < $own_rank ) {
+			if ( $requested_core && array_search( $base_role, $ladder, true ) < $own_rank && ! $limit ) {
 				$base_role = '';
 			}
 		}
 
-		// Snap a requested expiry to the closest preset at or below it, so the prefill never extends it.
-		$expires_in = 0;
-		if ( $scope->expires ) {
+		// Editing keeps the current expiry unless it's changed. Elsewhere, snap a requested expiry
+		// to the closest preset at or below it, so the prefill never extends it.
+		$keep_expiry = $scope->expires && ! $limit && 'app-password-scope-edit' === $args['class'];
+		$max_expiry  = $limit && $limit->expires ? $limit->expires - time() + MINUTE_IN_SECONDS : 0;
+		$expires_in  = $keep_expiry ? 'keep' : 0;
+		if ( $scope->expires && ! $keep_expiry ) {
 			foreach ( array_keys( self::expiry_options() ) as $seconds ) {
 				if ( $seconds && $seconds <= $scope->expires - time() + MINUTE_IN_SECONDS ) {
 					$expires_in = $seconds;
 				}
 			}
 		}
+
 		?>
-		<details class="app-password-scope" data-own-roles="<?php echo esc_attr( wp_json_encode( $own_core ) ); ?>" <?php echo $open || $scope->is_restricted() ? 'open' : ''; ?>>
+		<details class="app-password-scope <?php echo esc_attr( $args['class'] ); ?>" data-own-roles="<?php echo esc_attr( wp_json_encode( $own_core ) ); ?>" <?php echo $args['open'] || $scope->is_restricted() ? 'open' : ''; ?>>
 			<summary><?php esc_html_e( 'Limit what this password can do', 'application-passwords-scoped' ); ?></summary>
 
 			<p class="description">
@@ -152,15 +192,19 @@ class Admin {
 			<fieldset>
 				<legend><?php esc_html_e( 'Access level', 'application-passwords-scoped' ); ?></legend>
 				<label>
-					<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[read_only]" value="1" <?php checked( $scope->read_only ); ?> />
+					<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[read_only]" value="1" <?php echo $limit && $limit->read_only ? 'checked disabled' : checked( $scope->read_only, true, false ); ?> />
 					<?php esc_html_e( 'Read-only — can view but not change anything', 'application-passwords-scoped' ); ?>
+				</label>
+				<label>
+					<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[block_xmlrpc]" value="1" <?php echo $limit && $limit->block_xmlrpc ? 'checked disabled' : checked( $scope->block_xmlrpc, true, false ); ?> />
+					<?php esc_html_e( 'Block XML-RPC — allow only the REST API and other modern endpoints', 'application-passwords-scoped' ); ?>
 				</label>
 			</fieldset>
 
 			<fieldset class="app-password-scope-roles">
 				<legend><?php esc_html_e( 'Act with at most the permissions of:', 'application-passwords-scoped' ); ?></legend>
-				<label>
-					<input type="radio" name="<?php echo esc_attr( $field ); ?>[base_role]" value="" <?php checked( $base_role, '' ); ?> />
+				<label <?php echo $limit_rank ? 'hidden' : ''; ?>>
+					<input type="radio" name="<?php echo esc_attr( $field ); ?>[base_role]" value="" <?php checked( $base_role, '' ); ?> <?php disabled( (bool) $limit_rank ); ?> />
 					<?php
 					if ( $for_other ) {
 						/* translators: %s: display name of the user the password belongs to. */
@@ -171,7 +215,13 @@ class Admin {
 					?>
 				</label>
 				<?php foreach ( $ladder as $rank => $slug ) : ?>
-					<?php $above_own = $rank < $own_rank || ( $for_other && ! self::can_grant_role( $acting, $user, $slug ) ); ?>
+					<?php
+					$above_own   = $rank < $own_rank || ( $for_other && ! self::can_grant_role( $acting, $user, $slug ) );
+					$above_limit = $rank < $limit_rank;
+					if ( $above_limit && ! $above_own ) {
+						continue; // Narrowing only: don't offer roles above what the app asked for.
+					}
+					?>
 					<label class="<?php echo $above_own ? 'is-disabled' : ''; ?>">
 						<input type="radio" name="<?php echo esc_attr( $field ); ?>[base_role]" value="<?php echo esc_attr( $slug ); ?>" <?php checked( $base_role, $slug ); ?> <?php disabled( $above_own ); ?> />
 						<?php echo esc_html( translate_user_role( $names[ $slug ] ) ); ?>
@@ -188,7 +238,12 @@ class Admin {
 					<div class="app-password-scope-extra-roles">
 						<p><?php esc_html_e( 'Also keep these roles:', 'application-passwords-scoped' ); ?></p>
 						<?php foreach ( $extras as $slug ) : ?>
-							<?php $grantable = ! $for_other || self::can_grant_role( $acting, $user, $slug ); ?>
+							<?php
+							if ( $limit && null !== $limit->roles && ! in_array( $slug, $limit->roles, true ) ) {
+								continue; // Narrowing only.
+							}
+							$grantable = ! $for_other || self::can_grant_role( $acting, $user, $slug );
+							?>
 							<label class="<?php echo $grantable ? '' : 'is-disabled'; ?>">
 								<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[keep_roles][]" value="<?php echo esc_attr( $slug ); ?>" <?php checked( $grantable && ( null === $scope->roles || in_array( $slug, $scope->roles, true ) ) ); ?> <?php disabled( ! $grantable ); ?> />
 								<?php echo esc_html( translate_user_role( $names[ $slug ] ?? $slug ) ); ?>
@@ -204,8 +259,21 @@ class Admin {
 			<fieldset>
 				<label class="app-password-scope-expires">
 					<?php esc_html_e( 'Stop working after:', 'application-passwords-scoped' ); ?>
-					<select name="<?php echo esc_attr( $field ); ?>[expires_in]">
+					<select name="<?php echo esc_attr( $field ); ?>[expires_in]" data-expires="<?php echo (int) $scope->expires; ?>">
+						<?php if ( $keep_expiry ) : ?>
+							<option value="keep" selected>
+								<?php
+								/* translators: %s: date and time. */
+								printf( esc_html__( 'Unchanged (%s)', 'application-passwords-scoped' ), esc_html( wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $scope->expires ) ) );
+								?>
+							</option>
+						<?php endif; ?>
 						<?php foreach ( self::expiry_options() as $seconds => $label ) : ?>
+							<?php
+							if ( $max_expiry && ( ! $seconds || $seconds > $max_expiry ) ) {
+								continue; // Narrowing only.
+							}
+							?>
 							<option value="<?php echo esc_attr( $seconds ); ?>" <?php selected( $expires_in, $seconds ); ?>><?php echo esc_html( $label ); ?></option>
 						<?php endforeach; ?>
 					</select>
@@ -217,7 +285,7 @@ class Admin {
 				<div class="app-password-scope-groups">
 					<?php foreach ( Capability_Groups::all() as $slug => $group ) : ?>
 						<label title="<?php echo esc_attr( $group['description'] ); ?>">
-							<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[deny][]" value="<?php echo esc_attr( $slug ); ?>" <?php checked( in_array( $slug, $scope->deny, true ) ); ?> />
+							<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[deny][]" value="<?php echo esc_attr( $slug ); ?>" <?php echo $limit && in_array( $slug, $limit->deny, true ) ? 'checked disabled' : checked( in_array( $slug, $scope->deny, true ), true, false ); ?> />
 							<?php echo esc_html( $group['label'] ); ?>
 						</label>
 					<?php endforeach; ?>
@@ -227,18 +295,23 @@ class Admin {
 			<fieldset>
 				<legend><?php esc_html_e( 'Abilities', 'application-passwords-scoped' ); ?></legend>
 				<label>
-					<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[abilities_only]" value="1" <?php checked( $scope->abilities_only ); ?> />
+					<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[abilities_only]" value="1" <?php echo $limit && $limit->abilities_only ? 'checked disabled' : checked( $scope->abilities_only, true, false ); ?> />
 					<?php esc_html_e( 'Only allow access through the Abilities API (recommended for AI agents)', 'application-passwords-scoped' ); ?>
 				</label>
 				<label>
-					<input type="checkbox" class="app-password-scope-restrict-abilities" name="<?php echo esc_attr( $field ); ?>[restrict_abilities]" value="1" <?php checked( null !== $scope->abilities ); ?> />
+					<input type="checkbox" class="app-password-scope-restrict-abilities" name="<?php echo esc_attr( $field ); ?>[restrict_abilities]" value="1" <?php echo $limit && null !== $limit->abilities ? 'checked disabled' : checked( null !== $scope->abilities, true, false ); ?> />
 					<?php esc_html_e( 'Only allow these abilities:', 'application-passwords-scoped' ); ?>
 				</label>
 				<div class="app-password-scope-abilities">
 					<?php if ( $abilities ) : ?>
 						<?php foreach ( $abilities as $ability ) : ?>
+							<?php
+							if ( $limit && ! $limit->lists_ability( $ability->get_name() ) ) {
+								continue; // Narrowing only.
+							}
+							?>
 							<label title="<?php echo esc_attr( $ability->get_description() ); ?>">
-								<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[abilities][]" value="<?php echo esc_attr( $ability->get_name() ); ?>" <?php checked( null !== $scope->abilities && $scope->allows_ability( $ability->get_name() ) ); ?> />
+								<input type="checkbox" name="<?php echo esc_attr( $field ); ?>[abilities][]" value="<?php echo esc_attr( $ability->get_name() ); ?>" <?php checked( null !== $scope->abilities && $scope->lists_ability( $ability->get_name() ) ); ?> />
 								<?php echo esc_html( $ability->get_label() ); ?> <code><?php echo esc_html( $ability->get_name() ); ?></code>
 							</label>
 						<?php endforeach; ?>
@@ -338,9 +411,16 @@ class Admin {
 		}
 
 		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Scope::from_array() allowlists every field.
-		$data               = self::normalize_form( wp_unslash( $_POST[ self::FIELD ] ), get_userdata( $user_id ) );
-		$data['granted_by'] = get_current_user_id() === $user_id ? 0 : get_current_user_id();
-		Scope_Store::set( $user_id, $item['uuid'], Scope::from_array( $data ) );
+		$data = self::normalize_form( wp_unslash( $_POST[ self::FIELD ] ), get_userdata( $user_id ) );
+
+		// Narrowing only: never save more than the app asked for.
+		if ( isset( $_POST[ self::FIELD . '_requested' ] ) ) {
+			// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Decoded, then allowlisted by Scope::from_array().
+			$requested = Scope::from_array( json_decode( wp_unslash( $_POST[ self::FIELD . '_requested' ] ), true ) );
+			$data      = Scope::from_array( $data )->constrain_to( $requested )->to_array();
+		}
+
+		Scope_Store::save_from_request( $user_id, $item['uuid'], $data );
 		// phpcs:enable
 	}
 
@@ -376,6 +456,10 @@ class Admin {
 			$data['roles'] = array_merge( $base_roles, $kept );
 		}
 		unset( $data['role'] );
+
+		if ( isset( $data['expires_in'] ) && 'keep' === $data['expires_in'] ) {
+			unset( $data['expires_in'] );
+		}
 
 		if ( empty( $data['restrict_abilities'] ) ) {
 			$data['abilities'] = null;
@@ -515,8 +599,45 @@ class Admin {
 		// The list table only runs on the profile screens; the user ID comes from the screen.
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended
 		$user_id = isset( $_GET['user_id'] ) ? (int) $_GET['user_id'] : get_current_user_id();
+		$user    = get_userdata( $user_id );
+		$scope   = Scope_Store::get( $user_id, $item['uuid'] );
 
-		echo esc_html( Scope_Store::get( $user_id, $item['uuid'] )->summary() );
+		echo '<span class="app-password-scope-summary">' . esc_html( $scope->summary() ) . '</span>';
+
+		if ( ! $user || ! current_user_can( 'edit_app_password', $user_id, $item['uuid'] ) ) {
+			return;
+		}
+		?>
+		<div class="app-password-scope-editor" data-user-id="<?php echo (int) $user_id; ?>" data-uuid="<?php echo esc_attr( $item['uuid'] ); ?>" data-name="<?php echo esc_attr( $item['name'] ); ?>">
+			<button type="button" class="button-link app-password-scope-edit-toggle" aria-expanded="false">
+				<?php esc_html_e( 'Edit access', 'application-passwords-scoped' ); ?>
+			</button>
+			<div class="app-password-scope-edit-panel" hidden>
+				<?php
+				// These inputs sit inside the profile form but are saved over REST. Strip their
+				// names so the profile form neither submits them nor counts them as unsaved
+				// changes (core compares a serialized snapshot); admin.js reads `data-name`.
+				ob_start();
+				self::render_fields(
+					$scope,
+					$user,
+					array(
+						'open'  => true,
+						'field' => self::FIELD . '_edit[' . $item['uuid'] . ']',
+						'class' => 'app-password-scope-edit',
+					)
+				);
+				// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Escaped in render_fields(); only attribute names change.
+				echo preg_replace( '/<(input|select)([^>]*?)\sname="/', '<$1$2 data-name="', ob_get_clean() );
+				?>
+				<p>
+					<button type="button" class="button button-primary app-password-scope-edit-save"><?php esc_html_e( 'Save access', 'application-passwords-scoped' ); ?></button>
+					<button type="button" class="button app-password-scope-edit-cancel"><?php esc_html_e( 'Cancel', 'application-passwords-scoped' ); ?></button>
+					<span class="app-password-scope-edit-status" role="status"></span>
+				</p>
+			</div>
+		</div>
+		<?php
 	}
 
 	/**
