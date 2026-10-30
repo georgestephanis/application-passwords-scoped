@@ -35,6 +35,13 @@ class Credentials {
 	private static $current = null;
 
 	/**
+	 * Cache for escalation_caps(), keyed by the filter's callbacks.
+	 *
+	 * @var array{key: string, caps: string[]}|null
+	 */
+	private static $escalation_cache = null;
+
+	/**
 	 * Register a credential type.
 	 *
 	 * @param string $type Type name.
@@ -59,6 +66,8 @@ class Credentials {
 				'revoke'          => null,
 			)
 		);
+
+		self::$escalation_cache = null;
 	}
 
 	/**
@@ -92,10 +101,11 @@ class Credentials {
 	}
 
 	/**
-	 * Clear the current credential. For tests.
+	 * Clear the current credential and cached state. For tests.
 	 */
 	public static function reset() {
-		self::$current = null;
+		self::$current          = null;
+		self::$escalation_cache = null;
 	}
 
 	/**
@@ -126,6 +136,49 @@ class Credentials {
 	 * @return string[]
 	 */
 	public static function escalation_caps() {
+		// Called on every capability check for a restricted credential, so build the list once.
+		// The cache is keyed on the filter's callbacks rather than kept for the whole request: a
+		// filter added after the first check must still apply, or its caps would fail open.
+		$key = self::escalation_filter_key();
+
+		if ( null === self::$escalation_cache || $key !== self::$escalation_cache['key'] ) {
+			self::$escalation_cache = array(
+				'key'  => $key,
+				'caps' => self::build_escalation_caps(),
+			);
+		}
+
+		return self::$escalation_cache['caps'];
+	}
+
+	/**
+	 * Identifies the callbacks currently on `credential_scope_escalation_caps`. Cheap compared
+	 * with re-running them; changes whenever one is added or removed.
+	 *
+	 * @return string
+	 */
+	private static function escalation_filter_key() {
+		$hook = $GLOBALS['wp_filter']['credential_scope_escalation_caps'] ?? null;
+
+		if ( ! $hook instanceof \WP_Hook ) {
+			return '';
+		}
+
+		$ids = array();
+
+		foreach ( $hook->callbacks as $priority => $callbacks ) {
+			$ids[] = $priority . ':' . implode( ',', array_keys( $callbacks ) );
+		}
+
+		return implode( '|', $ids );
+	}
+
+	/**
+	 * Merge every type's escalation caps and apply the filter.
+	 *
+	 * @return string[]
+	 */
+	private static function build_escalation_caps() {
 		$caps = array();
 
 		foreach ( self::$types as $args ) {

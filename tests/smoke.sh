@@ -260,6 +260,9 @@ if xmlrpc abilities | grep -q 'faultCode'; then PASS=$((PASS + 1)); else FAIL=$(
 # Read-only passwords may read over XML-RPC (wp.getOptions); writes are covered above.
 if xmlrpc readonly | grep -q 'Software Name'; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL xmlrpc readonly should read"; fi
 
+# An escalation filter added mid-request still applies: the cached list must not fail open.
+check "escalation filter added late"          "$(can author 'edit_posts?late=1')"               false
+
 # A second credential type shares the ceiling (#17): the fixture's X-Test-Token header.
 tok() { # token method path [json] → REST error code or ok
 	"${CURL[@]}" -H "X-Test-Token: $1" -X "$2" -H 'Content-Type: application/json' ${4:+-d "$4"} "$URL/wp-json$3" |

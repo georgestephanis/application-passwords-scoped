@@ -35,6 +35,18 @@ add_action(
 				'methods'             => 'GET',
 				'permission_callback' => '__return_true',
 				'callback'            => static function ( $request ) {
+					// ?late=1: check once to warm Credentials' escalation cache, then list the cap
+					// as an escalation cap. The cache must notice, or the cap fails open.
+					if ( $request['late'] ) {
+						current_user_can( 'read' );
+						add_filter(
+							'credential_scope_escalation_caps',
+							static function ( $caps ) use ( $request ) {
+								$caps[] = $request['cap'];
+								return $caps;
+							}
+						);
+					}
 					return array(
 						'can'         => current_user_can( $request['cap'] ),
 						'super_admin' => is_super_admin(),
