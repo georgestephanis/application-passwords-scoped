@@ -12,7 +12,7 @@ namespace Application_Passwords_Scoped;
  * the user who owns the password, never grant them. An empty scope is "no restrictions" and
  * behaves exactly like a core Application Password.
  */
-final class Scope {
+final class Scope implements \Credential_Scope\Restriction {
 
 	/**
 	 * Roles whose capabilities this password may use, or null for no role restriction.
@@ -245,7 +245,35 @@ final class Scope {
 	}
 
 	/**
-	 * Whether a primitive capability survives this scope.
+	 * Whether only requests that read are allowed.
+	 *
+	 * @return bool
+	 */
+	public function restricts_to_reads() {
+		return $this->read_only;
+	}
+
+	/**
+	 * Whether REST requests are limited to the Abilities API.
+	 *
+	 * @return bool
+	 */
+	public function restricts_to_abilities() {
+		return $this->abilities_only;
+	}
+
+	/**
+	 * Whether this scope has ability rules, which only the REST API can enforce.
+	 *
+	 * @return bool
+	 */
+	public function requires_rest() {
+		return $this->abilities_only || null !== $this->abilities;
+	}
+
+	/**
+	 * Whether a primitive capability survives this scope. The granter isn't checked here: it is a
+	 * property of the credential, so Credential_Scope\Credential::allows_cap() applies it.
 	 *
 	 * @param string $cap Primitive capability.
 	 * @return bool
@@ -279,16 +307,6 @@ final class Scope {
 
 		if ( Capability_Groups::covers( $cap, $this->denied_caps() ) ) {
 			return false;
-		}
-
-		if ( $this->granted_by ) {
-			$granter = get_userdata( $this->granted_by );
-
-			// user_can() re-enters map_meta_cap, but for a different user ID, so the Enforcer passes
-			// it straight through. It also handles multisite super admins correctly.
-			if ( ! $granter || ! user_can( $granter, $cap ) ) {
-				return false;
-			}
 		}
 
 		if ( null === $this->roles ) {

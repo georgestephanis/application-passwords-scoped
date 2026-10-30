@@ -165,6 +165,43 @@ add_action(
 	}
 );
 
+// A second credential type, standing in for an OAuth or API-key plugin (#17). It knows nothing
+// about Application Passwords: it resolves the user from an `X-Test-Token` header and declares
+// the credential to the shared ceiling. Tokens: `ro` (read-only), `granted` (capped at Eddie),
+// `expired`, `undeclared` (resolves the user without declaring, to show that fails open).
+add_action(
+	'plugins_loaded',
+	static function () {
+		if ( class_exists( 'Credential_Scope\Credentials' ) ) {
+			Credential_Scope\Credentials::register_type( 'test_token', array( 'escalation_caps' => array( 'aps_test_manage_tokens' ) ) );
+		}
+	}
+);
+add_filter(
+	'determine_current_user',
+	static function ( $user_id ) {
+		$token = isset( $_SERVER['HTTP_X_TEST_TOKEN'] ) ? sanitize_key( wp_unslash( $_SERVER['HTTP_X_TEST_TOKEN'] ) ) : '';
+		if ( '' === $token || ! class_exists( 'Credential_Scope\Credentials' ) ) {
+			return $user_id;
+		}
+		if ( 'undeclared' !== $token ) {
+			$eddie = get_user_by( 'login', 'eddie' );
+			Credential_Scope\Credentials::set_current(
+				new Credential_Scope\Credential(
+					'test_token',
+					$token,
+					1,
+					'ro' === $token ? Scope::from_array( array( 'read_only' => true ) ) : null,
+					'granted' === $token && $eddie ? $eddie->ID : 0,
+					'expired' === $token ? time() - 10 : 0
+				)
+			);
+		}
+		return 1;
+	},
+	30
+);
+
 // Bypass probes for issue #14.
 
 // 1. Another plugin short-circuits a route from rest_pre_dispatch, at an early priority, and

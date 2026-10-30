@@ -115,6 +115,33 @@ plugin-side way to avoid that. It's reversible, so nobody loses credentials.
 Scopes govern what a credential can do over an API. Plugin code that calls an ability's callback
 directly is already-trusted server code, not something a password controls.
 
+### The ceiling is credential-agnostic (#17, first pass)
+
+Enforcement lives in `includes/credential-scope/`, which knows nothing about Application
+Passwords. Any authentication method that resolves a user can declare a `Credential` and get the
+same ceiling, escalation list, granter rule and expiry. Application Passwords are its first
+consumer, through `Enforcer`.
+
+**Why:** an OAuth or API-key plugin shouldn't have to reinvent scopes, and the security-critical
+parts should exist once. It also keeps the layer severable for a separate proposal.
+
+**What moved, and what didn't:**
+
+- **Granter and expiry belong to the credential, not the scope.** `Credential::allows_cap()`
+  applies the granter, so every type gets it. `Scope` still stores both fields for passwords.
+- **Escalation caps are shared across types.** A restricted credential of any type can't manage
+  credentials of any registered type, or of any plugin that adds its caps to
+  `credential_scope_escalation_caps`. Otherwise a scoped OAuth token could mint an unscoped app
+  password, or the other way round.
+- **Blocking XML-RPC stays with Application Passwords.** No other credential works there.
+- **Fails closed if a type forgets to validate.** The ceiling denies every capability to an
+  expired credential, and to one whose request-level rules can't be enforced on this request.
+- **Fails open if a type never declares its credential.** The layer can't see what it isn't
+  told about. The smoke test's `undeclared` token documents this.
+- **Error codes are generic.** `application_password_out_of_scope` and
+  `application_password_expired` became `credential_out_of_scope` and `credential_expired`. The
+  older filter names still work through `Enforcer`.
+
 ## Lessons
 
 These cost real time. Most also appear as rules in [AGENTS.md](../AGENTS.md).

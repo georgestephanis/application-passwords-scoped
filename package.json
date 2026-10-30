@@ -27,7 +27,7 @@
 		"lint:js": "wp-scripts lint-js assets",
 		"lint:style": "wp-scripts lint-style \"assets/**/*.css\"",
 		"lint:pkg-json": "wp-scripts lint-pkg-json .",
-		"lint:md:docs": "wp-scripts lint-md-docs README.md AGENTS.md \"docs/**/*.md\"",
+		"lint:md:docs": "wp-scripts lint-md-docs README.md AGENTS.md \"docs/**/*.md\" includes/credential-scope/README.md",
 		"format": "wp-scripts format assets",
 		"test:smoke": "tests/smoke.sh",
 		"test:multisite": "tests/multisite.sh"

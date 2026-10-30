@@ -79,7 +79,7 @@ scoped to Author alone doesn't. Prefer real capabilities, which scope precisely.
 - **Read-only passwords can only make `GET`, `HEAD` and `OPTIONS` requests** by default. Never change
   state on a `GET` route, or a read-only password will be able to change it. If a route reads
   despite using `POST` (a complex search, say), or a `GET` route writes, tell the scope with
-  `application_password_scope_request_is_read_only`, below.
+  `credential_scope_request_is_read_only`, below.
 - **Abilities-only passwords can't reach your routes at all.** Expose what agents need as
   abilities instead.
 
@@ -103,7 +103,7 @@ endpoint, for example, sends queries and mutations alike as `POST`:
 
 ```php
 add_filter(
-	'application_password_scope_request_is_read_only',
+	'credential_scope_request_is_read_only',
 	function ( $is_read_only, $request, $xmlrpc_method ) {
 		if ( null === $request && my_plugin_is_graphql_request() ) {
 			return ! my_plugin_operation_is_mutation();
@@ -117,7 +117,27 @@ add_filter(
 
 `$request` is the `WP_REST_Request` on REST, and `null` elsewhere. `$xmlrpc_method` is the method
 name on XML-RPC, where the default treats `get*` and `supported*` methods as reads. Return `true`
-only if the request truly can't change anything: read-only passwords trust your answer.
+only if the request truly can't change anything: read-only passwords trust your answer. The older
+name, `application_password_scope_request_is_read_only`, still works.
+
+## If your plugin issues credentials
+
+API keys, personal access tokens, OAuth clients: if a restricted password can create one of
+these, it can mint itself an unrestricted credential. Add the capabilities that guard them, so no
+restricted credential can use them:
+
+```php
+add_filter(
+	'credential_scope_escalation_caps',
+	function ( $caps ) {
+		$caps[] = 'my_plugin_manage_api_keys';
+		return $caps;
+	}
+);
+```
+
+If your plugin *authenticates* requests with its own credentials, it can have them scoped too:
+see [`includes/credential-scope/README.md`](../includes/credential-scope/README.md).
 
 ## Filters and actions
 
@@ -125,12 +145,13 @@ only if the request truly can't change anything: read-only passwords trust your 
 | --- | --- |
 | `application_password_scope_capability_groups` | Add, change or remove capability groups. |
 | `application_password_scope_hierarchical_roles` | Change which roles form the "at most" ladder. |
-| `application_password_scope_request_is_read_only` | Say whether a request only reads. |
+| `credential_scope_request_is_read_only` | Say whether a request only reads. (Older name: `application_password_scope_request_is_read_only`.) |
+| `credential_scope_escalation_caps` | Add capabilities that issue credentials, so no restricted credential can use them. |
 | `application_password_scope_allows_cap` | Override the scope's decision for one capability (can't grant what the user lacks). |
 | `application_password_scope_allows_ability` | Override the scope's decision for one ability. |
 | `application_password_scope_default` | Set the scope new passwords start with (default: full access). |
 | `application_password_scope` | Adjust the scope applied to an authenticated request. |
-| `application_password_scope_revoke_granted` | Revoke passwords someone created for others when they're deleted or demoted. |
+| `credential_scope_revoke_granted` | Revoke credentials someone issued for others when they're deleted or demoted. For passwords only, the older `application_password_scope_revoke_granted` still works. |
 | `application_password_scope_saved` (action) | React to a scope being saved from REST, a form or an approved access request. |
 | `application_password_scope_access_requested` (action) | Notify the owner another way when an app asks for more access. |
 | `application_password_scope_access_decided` (action) | React to an access request being approved or denied. |
