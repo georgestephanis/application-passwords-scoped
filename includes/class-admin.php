@@ -348,7 +348,7 @@ class Admin {
 	/**
 	 * Whether a granter could hand a role's powers to the owner: every capability of the role that
 	 * the owner can actually exercise, the granter must be able to exercise too. Mirrors the runtime
-	 * rule (Scope::allows_cap() intersects with the granter), so the UI never offers a choice the
+	 * rule (Credential_Scope\Credential::allows_cap() intersects with the granter), so the UI never offers a choice the
 	 * enforcement would silently undo.
 	 *
 	 * Capabilities neither user can use (e.g. `unfiltered_html` under DISALLOW_UNFILTERED_HTML)

@@ -21,6 +21,9 @@ defined( 'ABSPATH' ) || exit;
 const VERSION = '0.1.0';
 const FILE    = __FILE__;
 
+// The ceiling itself, which knows nothing about Application Passwords. See its README.md.
+require_once __DIR__ . '/includes/credential-scope/load.php';
+
 require_once __DIR__ . '/includes/class-capability-groups.php';
 require_once __DIR__ . '/includes/class-scope.php';
 require_once __DIR__ . '/includes/class-scope-store.php';

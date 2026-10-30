@@ -77,7 +77,7 @@ POST='{"title":"smoke","status":"publish"}'
 DRAFT='{"title":"smoke","status":"draft"}'
 SITE=/wp-abilities/v1/abilities/core/get-site-info/run
 USER=/wp-abilities/v1/abilities/core/get-user-info/run
-OOS=application_password_out_of_scope
+OOS=credential_out_of_scope
 
 # Unscoped: behaves exactly like core.
 expect full GET  /wp/v2/plugins ok
@@ -247,7 +247,7 @@ expect abilities GET /wp/v2/users/me/application-passwords/introspect ok
 
 # Expiry. A rejected password surfaces as either code depending on environment; Playground
 # reports rest_not_logged_in even for an outright wrong password.
-expect expired  GET /wp/v2/users/me/application-passwords/introspect 'application_password_expired|rest_not_logged_in'
+expect expired  GET /wp/v2/users/me/application-passwords/introspect 'credential_expired|rest_not_logged_in'
 expect expiring GET /wp/v2/users/me/application-passwords/introspect ok
 
 # XML-RPC: capability scopes work; abilities scopes refuse to authenticate.
@@ -259,6 +259,29 @@ if xmlrpc noplugins | grep -q 'Software Name'; then PASS=$((PASS + 1)); else FAI
 if xmlrpc abilities | grep -q 'faultCode'; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL xmlrpc abilities-only should be refused"; fi
 # Read-only passwords may read over XML-RPC (wp.getOptions); writes are covered above.
 if xmlrpc readonly | grep -q 'Software Name'; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL xmlrpc readonly should read"; fi
+
+# An escalation filter added mid-request still applies: the cached list must not fail open.
+check "escalation filter added late"          "$(can author 'edit_posts?late=1')"               false
+
+# A second credential type shares the ceiling (#17): the fixture's X-Test-Token header.
+tok() { # token method path [json] → REST error code or ok
+	"${CURL[@]}" -H "X-Test-Token: $1" -X "$2" -H 'Content-Type: application/json' ${4:+-d "$4"} "$URL/wp-json$3" |
+		python3 -c "import sys,json,re
+m=re.search(r'[\[{].*', sys.stdin.read(), re.S)
+try: d=json.loads(m.group(0)) if m else None
+except ValueError: d=None
+print(d['code'] if isinstance(d,dict) and 'code' in d and 'message' in d else ('ok' if d is not None else 'unparseable'))"
+}
+tok_can() { "${CURL[@]}" -H "X-Test-Token: $1" "$URL/wp-json/aps-test/v1/can/$2" | grep -o '"can":[a-z]*' | cut -d: -f2; }
+check "token ro, GET"                        "$(tok ro GET /wp/v2/plugins)"                    ok
+check "token ro, POST"                       "$(tok ro POST /wp/v2/posts "$DRAFT")"            "$OOS"
+check "token granted, mint an app password"  "$(tok granted POST /wp/v2/users/me/application-passwords '{"name":"escape"}')" rest_cannot_create_application_passwords
+check "token ro, own escalation cap"         "$(tok_can ro aps_test_manage_tokens)"            false
+check "token granted, Eddie can"             "$(tok_can granted edit_others_posts)"            true
+check "token granted, Eddie can't"           "$(tok_can granted manage_options)"               false
+check "token expired, ceiling fails closed"  "$(tok_can expired read)"                         false
+# Fails open by design: a method that never declares its credential gets no ceiling.
+check "token undeclared, no ceiling"         "$(tok_can undeclared manage_options)"            true
 
 # Deactivation suspends scoped passwords instead of unlocking them; reactivation restores them
 # (#13). Runs last because it changes plugin state.

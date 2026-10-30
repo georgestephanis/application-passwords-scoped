@@ -25,12 +25,22 @@ is a security bug. The same goes for any change that lets a password widen its o
 application-passwords-scoped.php   Thin loader: requires includes/, calls each class's init().
 uninstall.php                      Deletes stored scopes. Core's passwords are left alone.
 includes/
-├── class-scope.php                Scope value object: parsing untrusted input, allows_cap(),
-│                                  allows_ability(), summary(). All policy decisions live here.
+├── credential-scope/              The ceiling, for any credential type (#17). Knows nothing about
+│   │                              Application Passwords, so it can be severed. See its README.md.
+│   ├── load.php                   Requires the rest, calls Ceiling::init(). First copy loaded wins.
+│   ├── interface-restriction.php  What a scope must answer: allows_cap(), allows_ability(), …
+│   ├── class-credential.php       One credential: type, id, user, scope, granted_by, expires.
+│   │                              Applies the granter on top of the scope.
+│   ├── class-credentials.php      Registry of types, the current credential, validate(), cascade.
+│   ├── class-request.php          is_read_only(), is_rest_bound(), can_enforce().
+│   └── class-ceiling.php          Enforcement hooks (see below).
+├── class-scope.php                Scope value object, implements Restriction: parsing untrusted
+│                                  input, allows_cap(), allows_ability(), summary().
 ├── class-capability-groups.php    Named bundles of primitive caps ("Manage plugins", …). Filterable.
 ├── class-scope-store.php          Persistence: user meta `_application_password_scopes`, keyed by
 │                                  password UUID. Unrestricted scopes are deleted, not stored.
-├── class-enforcer.php             Runtime enforcement hooks (see below). Holds per-request state.
+├── class-enforcer.php             Application Passwords → Credential_Scope adapter: registers the
+│                                  type, declares the credential, XML-RPC block, granter on create.
 ├── class-rest.php                 `scope` field on core's /wp/v2/users/<id>/application-passwords.
 ├── class-admin.php                Profile + Authorize Application form fields, list-table column,
 │                                  Plugins-screen and delete-user warnings.
@@ -59,19 +69,29 @@ package.json                       @wordpress/scripts (lint/format only, no buil
 
 Everything hangs off hooks core already ships. Don't patch or replace core behavior.
 
+Enforcement is split in two (#17). `includes/credential-scope/` (namespace `Credential_Scope`)
+holds the ceiling, and works for any authentication method that declares its credential with
+`Credentials::set_current()`. `Enforcer` is the Application Passwords side: it turns an
+authenticated password into a `Credential`. Nothing in `credential-scope/` may refer to
+Application Passwords, `Scope`, or this plugin's classes; if the ceiling needs something new
+from a credential type, add it to `Restriction`, `Credential`, or `register_type()`.
+
 | Hook | Class | Purpose |
 | --- | --- | --- |
-| `application_password_did_authenticate` | Enforcer | Record which password authenticated and load its scope. |
-| `wp_authenticate_application_password_errors` | Enforcer | Fail auth for expired passwords, Block XML-RPC, and request-level scopes off REST unless the request is read-only (XML-RPC `get*`, plugin-declared). XML-RPC authenticates per method call, so this sees the method name. |
-| `map_meta_cap` @ `PHP_INT_MAX` | Enforcer | Return `do_not_allow` if any required primitive cap is out of scope. The backbone. |
-| `editable_roles` | Enforcer | Hide roles the scope couldn't exercise, so a scoped password can't create or promote users into them. |
-| `rest_pre_insert_user` | Enforcer | A user created without `roles` gets no role if `default_role` is out of scope. |
-| `site_option_site_admins` | Enforcer | Drop a cap-limited user from super admins for the request (`is_super_admin()` skips `map_meta_cap`). `activate()` also narrows a `$super_admins` global from wp-config.php, which `get_super_admins()` prefers. |
-| `rest_pre_dispatch` @ `PHP_INT_MIN` | Enforcer | Read-only (HTTP method) and abilities-only (route) gates, before any plugin can short-circuit. Also runs per `/batch/v1` sub-request. |
-| `rest_request_before_callbacks` @ `PHP_INT_MAX` | Enforcer | The same gates again, immediately before the route's permission callback and handler. |
-| `rest_post_dispatch` @ `PHP_INT_MAX` | Enforcer | The same gates on the way out, so an out-of-scope response is never returned, even if a plugin overrode the error. |
-| `delete_user`, `wpmu_delete_user`, `set_user_role`, `remove_user_role` | Enforcer | Offer the granter's passwords to `application_password_scope_revoke_granted` (#12). |
-| `wp_ability_permission_result` | Enforcer | Ability allowlist; read-only passwords only run `readonly`-annotated abilities. |
+| `application_password_did_authenticate` | Enforcer | Build a `Credential` from the password and its scope; `Credentials::set_current()`. |
+| `wp_authenticate_application_password_errors` | Enforcer | Block XML-RPC, then `Credentials::validate()`: expired, or request-level scopes off REST unless the request is read-only (XML-RPC `get*`, plugin-declared). XML-RPC authenticates per method call, so this sees the method name. |
+| `credential_scope_request_exempt` | Enforcer | Introspect and access-request routes stay reachable for restricted passwords. |
+| `credential_scope_request_is_read_only`, `credential_scope_revoke_granted` | Enforcer | Re-apply the older `application_password_scope_*` filters, so they keep working. |
+| `credential_scope_authenticated` | Ceiling | Decide once whether request-level rules can be enforced; narrow a `$super_admins` global from wp-config.php, which `get_super_admins()` prefers. |
+| `map_meta_cap` @ `PHP_INT_MAX` | Ceiling | Return `do_not_allow` if any required primitive cap is out of scope, or the credential is expired or unenforceable here. The backbone. |
+| `editable_roles` | Ceiling | Hide roles the credential couldn't exercise, so it can't create or promote users into them. |
+| `rest_pre_insert_user` | Ceiling | A user created without `roles` gets no role if `default_role` is out of scope. |
+| `site_option_site_admins` | Ceiling | Drop a cap-limited user from super admins for the request (`is_super_admin()` skips `map_meta_cap`). |
+| `rest_pre_dispatch` @ `PHP_INT_MIN` | Ceiling | Read-only (HTTP method) and abilities-only (route) gates, before any plugin can short-circuit. Also runs per `/batch/v1` sub-request. |
+| `rest_request_before_callbacks` @ `PHP_INT_MAX` | Ceiling | The same gates again, immediately before the route's permission callback and handler. |
+| `rest_post_dispatch` @ `PHP_INT_MAX` | Ceiling | The same gates on the way out, so an out-of-scope response is never returned, even if a plugin overrode the error. |
+| `delete_user`, `wpmu_delete_user`, `set_user_role`, `remove_user_role` | Ceiling | Offer every type's credentials the granter issued to `credential_scope_revoke_granted` (#12). |
+| `wp_ability_permission_result` | Ceiling | Ability allowlist; read-only credentials only run `readonly`-annotated abilities. |
 | `wp_create_application_password` | Enforcer, Admin | Apply the default scope (`application_password_scope_default`) and record `granted_by` when one user creates a password for another; no-JS authorize form. |
 | `rest_api_init`, `admin_notices`, `admin_post_*` | Access_Requests | Access-request endpoints, owner notice, approve/deny handler. |
 | `wp_delete_application_password` | Enforcer | Delete the scope with its password. |
@@ -79,17 +99,19 @@ Everything hangs off hooks core already ships. Don't patch or replace core behav
 | `delete_user_form` | Admin | List passwords the deleted user granted, which will stop working (#12). |
 | activation / deactivation | Lifecycle | Restore / suspend scoped passwords' hashes (#13). Network-wide on multisite. |
 
-Enforcement only applies when `$user_id` matches the user the active password authenticated as.
-Checks against other users pass through untouched. `Scope::allows_cap()` calls `user_can()` on the
-granter and relies on that.
+Enforcement only applies when `$user_id` matches the user the current credential authenticated as.
+Checks against other users pass through untouched. `Credential::allows_cap()` calls `user_can()` on
+the granter and relies on that.
 
 ### Invariants: don't break these
 
 - **A scoped password must not be able to escape through any account, its own or anyone else's.**
     - It can never use `create_app_password`, `edit_app_password` or `delete_app_password(s)`, so it
-      can't mint an unscoped sibling or rewrite its own scope (`Enforcer::ESCALATION_CAPS`).
+      can't mint an unscoped sibling or rewrite its own scope (`Enforcer::ESCALATION_CAPS`). The
+      same holds across types: a restricted credential of *any* type can't use the escalation caps
+      of *any* registered type (`Credentials::escalation_caps()`).
     - It can't use `edit_user`, `delete_user`, `promote_user` or `remove_user` on its own account,
-      or on any account that can do more than the scope allows (`Enforcer::may_manage_user()`).
+      or on any account that can do more than the scope allows (`Ceiling::may_manage_user()`).
       Otherwise it could reset that account's email or password and log in as it.
     - It can't give anyone a role it couldn't exercise itself, whether by explicit `roles` or by the
       site's `default_role`.
@@ -100,7 +122,7 @@ granter and relies on that.
 - `granted_by` is **always set server-side**, never from request input. Every save from a request,
   form or approval goes through `Scope_Store::save_from_request()`: a non-owner acting becomes the
   granter, and an owner editing keeps the existing one.
-- **Read-only is decided by `Enforcer::is_read_only()`** and nowhere else. On REST it uses the
+- **Read-only is decided by `Credential_Scope\Request::is_read_only()`** and nowhere else. On REST it uses the
   effective method after `_method` / `X-HTTP-Method-Override`, so an override can't disguise a write.
 - **Access requests and introspect are the only things a restricted password can always do.**
   Neither changes what it may do; only an owner's approval can. Keep it that way.
@@ -149,8 +171,9 @@ CI (`.github/workflows/lint.yml`) runs `composer lint:php` and `npm run lint` on
   release at least two weeks old, then run `npm run format` and `npm run lint`, since its
   Prettier and stylelint rules change between majors. `assets/admin.js` declares
   `/* global jQuery */`: it runs in wp-admin with core's jQuery and `wp.hooks`, and isn't bundled.
-- **Docs:** `npm run lint:md:docs` lints `README.md`, `AGENTS.md` and `docs/`. Give fenced code
-  blocks a language, and use `| a | b |` table spacing.
+- **Docs:** `npm run lint:md:docs` lints `README.md`, `AGENTS.md`, `docs/` and
+  `includes/credential-scope/README.md`. Give fenced code blocks a language, and use
+  `| a | b |` table spacing.
 
 ## Testing
 
@@ -215,7 +238,7 @@ installs the plugin from GitHub, so it tests `trunk`, not your working tree.
   blueprint `login` step. If the browser lands on wp-login.php, delete the
   `playground_auto_login_already_happened` cookie left by an earlier server and reload `/`.
 - **Rejected passwords report `rest_not_logged_in` in Playground**, even an outright wrong one,
-  not `incorrect_password` or our `application_password_expired`. Assert on "rejected", not on
+  not `incorrect_password` or our `credential_expired`. Assert on "rejected", not on
   the specific code.
 - **REST `capabilities` on a user shows raw role caps, not `map_meta_cap` results.** A cap can
   appear `true` there and still fail `user_can()`, e.g. `unfiltered_html` under
@@ -229,13 +252,15 @@ installs the plugin from GitHub, so it tests `trunk`, not your working tree.
 ## Conventions
 
 - Namespace `Application_Passwords_Scoped`, one class per file, `class-*.php`, static `init()`.
+  The severable layer uses `Credential_Scope` and hook prefix `credential_scope_`.
 - Text domain `application-passwords-scoped`. Translate all user-facing strings.
 - WordPress Coding Standards: Yoda conditions, `wp_unslash()` before use, escape on output.
   Wherever PHPCS is silenced with `phpcs:ignore`, say why on the same line.
 - Comments explain *why*, especially security reasoning and core quirks. Match the existing
   density; don't narrate what the code does.
-- Policy belongs in `Scope`, hook wiring in `Enforcer`, presentation in `Admin`. Don't put
-  capability decisions in the admin layer. The UI may *preview* them, as `can_grant_role()`
+- Policy belongs in `Scope` (and, for what every credential shares, `Credential_Scope`), hook
+  wiring in `Enforcer` and `Ceiling`, presentation in `Admin`. Don't put capability decisions
+  in the admin layer. The UI may *preview* them, as `can_grant_role()`
   does, but enforcement must never depend on the UI.
 - New extension points: name filters `application_password_scope_*` and document them with a
   docblock where they're applied.

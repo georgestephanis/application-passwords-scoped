@@ -33,6 +33,8 @@
             <property name="prefixes" type="array">
                 <element value="Application_Passwords_Scoped"/>
                 <element value="application_password_scope"/>
+                <element value="Credential_Scope"/>
+                <element value="credential_scope"/>
             </property>
         </properties>
     </rule>
